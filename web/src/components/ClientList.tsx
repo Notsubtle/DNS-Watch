@@ -9,12 +9,17 @@ function isNew(firstSeen: number | null): boolean {
   return Date.now() / 1000 - firstSeen < NEW_DEVICE_WINDOW_S;
 }
 
-export default function ClientList({ clients }: { clients: ClientActivity[] }) {
+interface Props {
+  clients: ClientActivity[];
+  onSelect?: (ip: string) => void;
+}
+
+export default function ClientList({ clients, onSelect }: Props) {
   const max = Math.max(1, ...clients.map((c) => c.count));
   return (
     <div className="panel">
       <h2>Top clients</h2>
-      <ul className="client-list">
+      <ul className={`client-list${onSelect ? " clickable" : ""}`}>
         {clients.map((c) => {
           const pct = Math.round((c.count / max) * 100);
           return (
@@ -23,6 +28,12 @@ export default function ClientList({ clients }: { clients: ClientActivity[] }) {
               style={{
                 background: `linear-gradient(90deg, var(--ink-blue-bg) ${pct}%, transparent ${pct}%)`,
               }}
+              onClick={onSelect ? () => onSelect(c.ip) : undefined}
+              role={onSelect ? "button" : undefined}
+              tabIndex={onSelect ? 0 : undefined}
+              onKeyDown={
+                onSelect ? (ev) => (ev.key === "Enter" || ev.key === " ") && onSelect(c.ip) : undefined
+              }
             >
               <span className="name" title={c.ip}>
                 {c.name}

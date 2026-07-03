@@ -65,7 +65,7 @@ export interface Timeseries {
   series: TimeseriesPoint[];
 }
 
-export type RuleType = "volume_threshold" | "new_device" | "domain_keyword";
+export type RuleType = "volume_threshold" | "new_device" | "domain_keyword" | "device_quiet";
 
 export interface AlertRule {
   id: number;
@@ -90,6 +90,17 @@ export interface AlertsResponse {
   evaluated_at: number;
   new: number;
   events: AlertEvent[];
+}
+
+export interface ClientDetail {
+  ip: string;
+  name: string;
+  first_seen: number | null;
+  last_seen: number | null;
+  summary: Summary;
+  top_domains: TopEntry[];
+  query_types: QueryTypeEntry[];
+  timeseries: Timeseries;
 }
 
 export type WebhookFormat = "generic" | "slack" | "discord";
@@ -163,6 +174,9 @@ export const api = {
     getJson<ClientActivity[]>(
       `/api/client-activity${qs({ range: f.range, limit, buckets })}`
     ),
+
+  clientDetail: (ip: string, range: string) =>
+    getJson<ClientDetail>(`/api/client/${encodeURIComponent(ip)}${qs({ range })}`),
 
   queryTypes: (f: Pick<Filters, "client" | "range">) =>
     getJson<QueryTypeEntry[]>(`/api/query-types${qs({ client: f.client, range: f.range })}`),

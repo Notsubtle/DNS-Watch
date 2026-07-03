@@ -19,6 +19,7 @@ import ClientList from "./components/ClientList";
 import TimeSeriesChart from "./components/TimeSeriesChart";
 import QueryTypeBreakdown from "./components/QueryTypeBreakdown";
 import DrilldownModal from "./components/DrilldownModal";
+import ClientDetailModal from "./components/ClientDetailModal";
 import AlertsPanel from "./components/AlertsPanel";
 import RulesModal from "./components/RulesModal";
 import SettingsModal from "./components/SettingsModal";
@@ -46,6 +47,7 @@ export default function App() {
   const [queryTypes, setQueryTypes] = useState<QueryTypeEntry[]>([]);
   const [alertEvents, setAlertEvents] = useState<AlertEvent[]>([]);
   const [drilldown, setDrilldown] = useState<string | null>(null);
+  const [clientDetail, setClientDetail] = useState<string | null>(null);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -174,7 +176,7 @@ export default function App() {
         />
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <TopList title="Top domains" entries={topDomains} onSelect={setDrilldown} />
-          <ClientList clients={topClients} />
+          <ClientList clients={topClients} onSelect={setClientDetail} />
           <QueryTypeBreakdown entries={queryTypes} />
         </div>
       </div>
@@ -184,6 +186,14 @@ export default function App() {
           domain={drilldown}
           filters={effectiveFilters}
           onClose={() => setDrilldown(null)}
+        />
+      )}
+
+      {clientDetail && (
+        <ClientDetailModal
+          ip={clientDetail}
+          range={effectiveFilters.range}
+          onClose={() => setClientDetail(null)}
         />
       )}
 

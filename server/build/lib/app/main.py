@@ -186,6 +186,12 @@ def api_timeseries(
     return db.timeseries(client, effective_since, until, buckets)
 
 
+@app.get("/api/client/{ip}")
+def api_client_detail(ip: str, range: str | None = "24h", since: int | None = None):
+    effective_since = _since_from_range(range, since)
+    return db.client_detail(ip, effective_since, None)
+
+
 @app.get("/api/summary")
 def api_summary(client: str | None = None, range: str | None = "1h", since: int | None = None):
     effective_since = _since_from_range(range, since)

@@ -464,6 +464,24 @@ tr:hover td {
   max-width: 640px;
 }
 
+.modal.modal-wide {
+  max-width: 860px;
+}
+
+.modal-ip {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-faint);
+  font-weight: 400;
+}
+
+.client-detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 4px;
+}
+
 .modal-head {
   display: flex;
   align-items: center;

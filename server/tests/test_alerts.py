@@ -79,6 +79,35 @@ def test_evaluation_and_cooldown(client):
     assert len(a2["events"]) == len(a["events"])
 
 
+def test_device_quiet_rule(client, ftl):
+    import sqlite3
+    from conftest import CLIENTS
+    # Add a client that was busy ~90 min ago but silent since -> should trip a
+    # device_quiet rule with a 60m window.
+    now = int(__import__("time").time())
+    conn = sqlite3.connect(ftl["path"])
+    if ftl["schema"] == "new":
+        conn.execute("INSERT INTO client VALUES (98,'192.168.1.98','oldtv')")
+        for _ in range(30):
+            conn.execute("INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,98)",
+                         (now - 90 * 60, 1, 2, "a.example.com"))
+    else:
+        conn.execute("INSERT INTO network VALUES (98,'oldtv')")
+        conn.execute("INSERT INTO network_addresses VALUES ('192.168.1.98',98)")
+        for _ in range(30):
+            conn.execute("INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,'192.168.1.98')",
+                         (now - 90 * 60, 1, 2, "a.example.com"))
+    conn.commit()
+    conn.close()
+
+    client.post("/api/alert-rules", json={
+        "name": "Quiet", "type": "device_quiet",
+        "params": {"window_minutes": 60, "min_prior": 20}})
+    events = client.get("/api/alerts").json()["events"]
+    quiet = [e for e in events if e["type"] == "device_quiet"]
+    assert quiet and any("oldtv" in e["message"] for e in quiet)
+
+
 def test_settings_roundtrip_and_format_validation(client):
     assert client.get("/api/settings").json()["webhook_enabled"] is False
     updated = client.patch("/api/settings", json={

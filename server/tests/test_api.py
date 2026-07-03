@@ -48,6 +48,16 @@ def test_timeseries_bucket_validation(client):
     assert client.get("/api/timeseries?range=all&buckets=9999").status_code == 422
 
 
+def test_client_detail_endpoint(client):
+    d = client.get("/api/client/192.168.1.10?range=all").json()
+    assert d["ip"] == "192.168.1.10"
+    assert d["first_seen"] is not None and d["last_seen"] is not None
+    # bundled sections present and internally consistent
+    assert d["summary"]["total_queries"] == sum(x["count"] for x in d["query_types"])
+    assert sum(p["total"] for p in d["timeseries"]["series"]) == d["summary"]["total_queries"]
+    assert len(d["top_domains"]) > 0
+
+
 def test_csv_export(client):
     r = client.get("/api/queries.csv?range=all&limit=1000")
     assert r.status_code == 200

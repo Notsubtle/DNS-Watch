@@ -29,7 +29,7 @@ STORE_PATH = os.environ.get("DNSWATCH_DB_PATH", "/data/dnswatch.db")
 # the same event.
 _eval_lock = threading.Lock()
 
-VALID_TYPES = {"volume_threshold", "new_device", "domain_keyword"}
+VALID_TYPES = {"volume_threshold", "new_device", "domain_keyword", "device_quiet"}
 
 # Webhook payload shapes. "generic" is DNS Watch's own JSON; "slack"/"discord"
 # emit exactly the single field each of those incoming-webhook APIs requires.
@@ -44,6 +44,7 @@ DEFAULT_COOLDOWN = {
     "volume_threshold": 900,
     "new_device": 86400,
     "domain_keyword": 900,
+    "device_quiet": 3600,
 }
 
 
@@ -336,6 +337,20 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
             _emit(pending, rule, "warning",
                   f'{count} queries matching "{keyword}" in {window_min}m (≥ {min_count})',
                   f"kw:{rule['id']}")
+
+    elif rule["type"] == "device_quiet":
+        # Fire when a client that was active in the *prior* window has gone
+        # silent in the *recent* one — device unplugged, offline, or blocked.
+        window_min = int(p.get("window_minutes", 60))
+        min_prior = int(p.get("min_prior", 20))
+        recent = {c["ip"]: c["count"] for c in db.client_counts(now - window_min * 60, now)}
+        prior = db.client_counts(now - 2 * window_min * 60, now - window_min * 60)
+        for c in prior:
+            if c["count"] >= min_prior and recent.get(c["ip"], 0) == 0:
+                _emit(pending, rule, "warning",
+                      f"{c['name']} went quiet — {c['count']} queries in the prior "
+                      f"{window_min}m, none since",
+                      f"quiet:{rule['id']}:{c['ip']}")
 
 
 def evaluate() -> list[dict]:

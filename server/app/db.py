@@ -495,6 +495,52 @@ def client_activity(
     return result
 
 
+def client_counts(since: int | None, until: int | None) -> list[dict]:
+    """Per-client query counts within a window. Used by the device-quiet rule to
+    compare a client's activity across two adjacent windows."""
+    select, join = _client_join_sql()
+    where_sql, params = _build_where(since=since, until=until)
+    sql = f"""
+        SELECT {select}, COUNT(*) AS n
+        FROM queries q
+        {join}
+        WHERE {where_sql}
+        GROUP BY {_client_ip_col()}
+    """
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [
+        {"ip": r["client_ip"], "name": r["client_name"] or r["client_ip"], "count": r["n"]}
+        for r in rows
+    ]
+
+
+def client_detail(ip: str, since: int | None, until: int | None) -> dict:
+    """Everything the per-client page needs: windowed summary, top domains,
+    query types, and time-series, plus the client's global first/last-seen."""
+    select, join = _client_join_sql()
+    ccol = _client_ip_col()
+    # MIN/MAX over all of this client's rows; client_name is constant within the
+    # WHERE so selecting it un-grouped is safe.
+    with _connect() as conn:
+        row = conn.execute(
+            f"SELECT {select}, MIN(q.timestamp) AS fs, MAX(q.timestamp) AS ls "
+            f"FROM queries q {join} WHERE {ccol} = ?",
+            [ip],
+        ).fetchone()
+    name = row["client_name"] if row and row["client_name"] else ip
+    return {
+        "ip": ip,
+        "name": name,
+        "first_seen": row["fs"] if row else None,
+        "last_seen": row["ls"] if row else None,
+        "summary": summary(ip, since, until),
+        "top_domains": top_domains(ip, since, limit=10),
+        "query_types": query_types(ip, since, until),
+        "timeseries": timeseries(ip, since, until, buckets=40),
+    }
+
+
 def new_clients(after_ts: int) -> list[dict]:
     """Clients whose *first-ever* query is at or after `after_ts`.
 

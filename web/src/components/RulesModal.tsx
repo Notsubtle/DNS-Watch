@@ -5,6 +5,7 @@ const TYPE_LABELS: Record<RuleType, string> = {
   volume_threshold: "Query volume",
   new_device: "New device",
   domain_keyword: "Domain keyword",
+  device_quiet: "Device went quiet",
 };
 
 function describe(rule: AlertRule): string {
@@ -15,6 +16,9 @@ function describe(rule: AlertRule): string {
   }
   if (rule.type === "new_device") {
     return `device first seen within ${p.window_minutes ?? 1440}m`;
+  }
+  if (rule.type === "device_quiet") {
+    return `active client (≥ ${p.min_prior ?? 20} queries) goes silent for ${p.window_minutes ?? 60}m`;
   }
   return `≥ ${p.min_count ?? 1} queries matching "${p.keyword ?? ""}" in ${p.window_minutes ?? 60}m`;
 }
@@ -37,6 +41,7 @@ export default function RulesModal({ onClose, onChange }: Props) {
   const [scope, setScope] = useState<"any" | "per_client">("per_client");
   const [keyword, setKeyword] = useState("");
   const [minCount, setMinCount] = useState(1);
+  const [minPrior, setMinPrior] = useState(20);
 
   function load() {
     api.listRules().then(setRules).catch((e) => setError((e as Error).message));
@@ -55,6 +60,9 @@ export default function RulesModal({ onClose, onChange }: Props) {
     }
     if (type === "new_device") {
       return { window_minutes: windowMin };
+    }
+    if (type === "device_quiet") {
+      return { min_prior: minPrior, window_minutes: windowMin };
     }
     return { keyword, min_count: minCount, window_minutes: windowMin };
   }
@@ -181,6 +189,19 @@ export default function RulesModal({ onClose, onChange }: Props) {
                   hits
                 </label>
               </>
+            )}
+
+            {type === "device_quiet" && (
+              <label>
+                was ≥
+                <input
+                  type="number"
+                  min={1}
+                  value={minPrior}
+                  onChange={(e) => setMinPrior(Number(e.target.value))}
+                />
+                queries, now silent
+              </label>
             )}
 
             <label>

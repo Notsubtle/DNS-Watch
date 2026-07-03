@@ -114,15 +114,17 @@ npm run dev    # http://localhost:5173, proxies /api to :8090
 - **Top domains / top clients** — ranked lists for the current filter window.
   Top clients show a per-client activity **sparkline** and a **NEW** badge for
   devices first seen in the last 24h. Click a top domain to open a **drill-down**
-  showing which clients queried it.
+  showing which clients queried it, or click a **client** to open its full
+  **detail view** (its own volume chart, top domains, query types, first/last seen).
 - **Query-volume chart** — a time-series of allowed vs. blocked queries across the
   selected range, bucketed and hoverable.
 - **Query-type breakdown** — A / AAAA / HTTPS / PTR / … distribution.
 - **CSV export** — download the current filtered query view.
 - **Pagination** — the query log is paged with an exact total ("201–400 of 5,000").
 - **Alert rules** — watch for query-volume spikes (per-client or overall), new
-  devices, or specific domain keywords. Rules are evaluated **server-side on a
-  timer** (`ALERT_EVAL_INTERVAL_SECONDS`, default 60), so alerts fire and webhooks
+  devices, specific domain keywords, or a **device going quiet** (an active client
+  that suddenly stops querying — offline/unplugged/blocked). Rules are evaluated
+  **server-side on a timer** (`ALERT_EVAL_INTERVAL_SECONDS`, default 60), so alerts fire and webhooks
   send even with no dashboard open. Fired alerts show in the Alerts panel.
   Rules and events are stored in DNS Watch's **own** writable SQLite database
   (`DNSWATCH_DB_PATH`, default `/data/dnswatch.db`, mounted as the `dnswatch-data`
