@@ -1,0 +1,29 @@
+/*
+  Design tokens adapted from the Jooce dashboard's "ink" palette.
+  Same variable-driven approach: swap this file to retheme the whole app.
+*/
+:root {
+  --ink-bg: #0b0f14;
+  --ink-surf: #12181f;
+  --ink-surf2: #182029;
+  --ink-border: #232d38;
+
+  --ink-text: #e6edf5;
+  --ink-muted: #93a3b8;
+  --ink-faint: #5c6b7f;
+
+  --ink-blue: #4d9eff;
+  --ink-green: #3abf7a;
+  --ink-amber: #f0a030;
+  --ink-red: #e05050;
+  --ink-gray: #6b7787;
+
+  --ink-blue-bg: rgba(77, 158, 255, 0.12);
+  --ink-green-bg: rgba(58, 191, 122, 0.12);
+  --ink-amber-bg: rgba(240, 160, 48, 0.12);
+  --ink-red-bg: rgba(224, 80, 80, 0.12);
+
+  --radius: 10px;
+  --font-mono: "SF Mono", "Cascadia Code", Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}

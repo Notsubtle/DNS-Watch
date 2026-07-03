@@ -1,0 +1,15 @@
+services:
+  dns-dashboard:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: dns-dashboard
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-8090}:8090"
+    environment:
+      PIHOLE_DB_PATH: /pihole-data/pihole-FTL.db
+    volumes:
+      # Read-only mount of Pi-hole's data folder. ':ro' is critical — this
+      # process must never be able to write to Pi-hole's database.
+      - ${PIHOLE_ETC_PATH}:/pihole-data:ro
