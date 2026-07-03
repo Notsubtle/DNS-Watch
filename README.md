@@ -137,6 +137,8 @@ npm run dev    # http://localhost:5173, proxies /api to :8090
   off-thread, so a slow or unreachable endpoint never affects the dashboard.
 - **Client naming** — pulls names Pi-hole already knows (from DHCP lease / your
   manual naming in Pi-hole's own UI); no separate naming step needed.
+- **Optional login** — set `DNSWATCH_AUTH_PASSWORD` (see `.env.example`) to gate the
+  whole app behind HTTP Basic auth. Left unset, it's open on your LAN as before.
 
 ## Notes / limitations
 
@@ -149,3 +151,7 @@ npm run dev    # http://localhost:5173, proxies /api to :8090
   even if you've locked down Pi-hole's admin UI per the hardening guide.
 - SQLite read-only connections don't lock the file, so this has effectively zero
   performance impact on Pi-hole/FTL.
+- The dashboard exposes who-visited-what and lets you configure webhooks, so treat
+  it as sensitive. The optional Basic auth guards access, but it's cleartext over
+  HTTP — if DNS Watch is reachable beyond a trusted LAN, front it with a TLS
+  reverse proxy (Caddy, nginx, Traefik).

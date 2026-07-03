@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import csv
+import hmac
 import io
 import os
 import threading
@@ -9,7 +11,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -54,6 +56,34 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
+
+# Optional HTTP Basic auth. Enabled only when DNSWATCH_AUTH_PASSWORD is set, so
+# the default (unset) stays open for LAN use and local dev. When set, every
+# route requires the credential except the health check (for container/monitor
+# probes) and CORS preflight. Basic auth is cleartext-over-HTTP — put DNS Watch
+# behind a TLS reverse proxy if it's reachable beyond a trusted LAN.
+AUTH_USERNAME = os.environ.get("DNSWATCH_AUTH_USERNAME", "admin")
+AUTH_PASSWORD = os.environ.get("DNSWATCH_AUTH_PASSWORD", "")
+
+
+@app.middleware("http")
+async def basic_auth(request, call_next):
+    if not AUTH_PASSWORD or request.method == "OPTIONS" or request.url.path == "/api/health":
+        return await call_next(request)
+    header = request.headers.get("Authorization", "")
+    if header.startswith("Basic "):
+        try:
+            user, _, pw = base64.b64decode(header[6:]).decode("utf-8").partition(":")
+            # Compare both fields (constant-time) and AND the results so timing
+            # doesn't reveal which half matched.
+            if hmac.compare_digest(user, AUTH_USERNAME) & hmac.compare_digest(pw, AUTH_PASSWORD):
+                return await call_next(request)
+        except Exception:  # noqa: BLE001 — malformed header -> treat as unauthenticated
+            pass
+    return Response(
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="DNS Watch"'},
+    )
 
 
 def _since_from_range(range_param: str | None, since_param: int | None) -> int | None:

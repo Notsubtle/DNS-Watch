@@ -15,6 +15,10 @@ services:
       # How often (seconds) the server evaluates alert rules on its own, so
       # alerts + webhooks fire even with no dashboard open. Set 0 to disable.
       ALERT_EVAL_INTERVAL_SECONDS: 60
+      # Optional dashboard login. Unset = open on LAN; set a password to require
+      # HTTP Basic auth for the whole app. Username defaults to "admin".
+      DNSWATCH_AUTH_USERNAME: ${DNSWATCH_AUTH_USERNAME:-admin}
+      DNSWATCH_AUTH_PASSWORD: ${DNSWATCH_AUTH_PASSWORD:-}
     volumes:
       # Read-only mount of Pi-hole's data folder. ':ro' is critical — this
       # process must never be able to write to Pi-hole's database.
