@@ -1,5 +1,7 @@
 # DNS Watch — a live per-client DNS dashboard for Pi-hole
 
+[![CI](https://github.com/Notsubtle/DNS-Watch/actions/workflows/ci.yml/badge.svg)](https://github.com/Notsubtle/DNS-Watch/actions/workflows/ci.yml)
+
 A small, self-hosted dashboard that sits **next to** your existing Pi-hole container,
 reads its query database directly, and gives you a filterable, live view of which
 device is visiting which domain.
