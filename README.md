@@ -15,6 +15,40 @@ dns-dashboard/
   web/                   <- Vite + React + TypeScript frontend
 ```
 
+## Why DNS Watch, when Pi-hole already has a dashboard?
+
+Pi-hole's built-in admin UI is genuinely good, and DNS Watch is **not a replacement**
+for it — you still use Pi-hole's own dashboard to manage blocklists, DHCP, upstream
+resolvers, and everything else. DNS Watch is a **focused, read-only lens** for one
+job Pi-hole's dashboard doesn't really cover: *watching what each device on your
+network is doing, and telling you when something changes.*
+
+What it adds on top of Pi-hole's dashboard:
+
+- **Per-client first.** Pi-hole's dashboard is aggregate-first (totals, then you dig
+  for per-device detail). DNS Watch is built the other way around: client is a
+  first-class filter, every top client has an activity **sparkline**, and you can
+  slice the whole view to a single device instantly.
+- **New-device flagging.** Any device whose first-ever query landed in the last 24h
+  gets a **NEW** badge. Pi-hole won't tell you a new gadget just joined your network;
+  this does — which is exactly when an unexpected device matters most.
+- **Proactive alerting Pi-hole simply doesn't have.** Rules for query-volume spikes
+  (per-client or overall), new devices, and domain-keyword watches — with optional
+  **webhook delivery** to ntfy, Home Assistant, Slack, or Discord. Pi-hole *shows*
+  you data; DNS Watch can *notify* you without you having a tab open.
+- **Domain drill-down.** Click any top domain to see exactly which clients queried
+  it in the current window — a workflow that's clunky in Pi-hole's query log.
+- **Works even with Pi-hole's UI locked down.** It reads the FTL database directly,
+  so it keeps working if you've hardened or disabled Pi-hole's admin web UI. It also
+  never writes to Pi-hole — the database is opened strictly read-only, so there's
+  zero risk to DNS resolution.
+- **Yours to extend.** It's a small FastAPI + React app — add rule types, panels, or
+  exports to fit how *you* watch your network. CSV export of the current filtered
+  view is built in.
+
+In short: keep Pi-hole for **controlling** DNS; add DNS Watch for **observing and
+being alerted about** per-client activity.
+
 ## How it works
 
 - Pi-hole (FTL) already logs every DNS query to a SQLite database at
