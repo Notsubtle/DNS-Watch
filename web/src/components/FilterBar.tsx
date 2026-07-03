@@ -6,6 +6,7 @@ interface Props {
   clients: ClientInfo[];
   autoRefresh: boolean;
   onToggleAutoRefresh: () => void;
+  csvHref: string;
 }
 
 const RANGES = [
@@ -16,7 +17,7 @@ const RANGES = [
   { value: "all", label: "All" },
 ];
 
-export default function FilterBar({ filters, onChange, clients, autoRefresh, onToggleAutoRefresh }: Props) {
+export default function FilterBar({ filters, onChange, clients, autoRefresh, onToggleAutoRefresh, csvHref }: Props) {
   return (
     <div className="filter-bar">
       <select
@@ -58,6 +59,10 @@ export default function FilterBar({ filters, onChange, clients, autoRefresh, onT
       ))}
 
       <div className="spacer" />
+
+      <a className="btn-link" href={csvHref} download>
+        Export CSV
+      </a>
 
       <button className={autoRefresh ? "active" : ""} onClick={onToggleAutoRefresh}>
         {autoRefresh ? "● Live" : "Paused"}

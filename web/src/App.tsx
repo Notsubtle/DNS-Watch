@@ -1,9 +1,21 @@
 import { useEffect, useRef, useState } from "react";
-import { api, ClientInfo, Filters, QueryRow, Summary, TopEntry } from "./api";
+import {
+  api,
+  ClientInfo,
+  Filters,
+  QueryRow,
+  QueryTypeEntry,
+  Summary,
+  Timeseries,
+  TopEntry,
+} from "./api";
 import FilterBar from "./components/FilterBar";
 import SummaryCards from "./components/SummaryCards";
 import QueryTable from "./components/QueryTable";
 import TopList from "./components/TopList";
+import TimeSeriesChart from "./components/TimeSeriesChart";
+import QueryTypeBreakdown from "./components/QueryTypeBreakdown";
+import DrilldownModal from "./components/DrilldownModal";
 
 const REFRESH_MS = 5000;
 const PAGE_SIZE = 200;
@@ -24,6 +36,9 @@ export default function App() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [topDomains, setTopDomains] = useState<TopEntry[]>([]);
   const [topClients, setTopClients] = useState<TopEntry[]>([]);
+  const [series, setSeries] = useState<Timeseries | null>(null);
+  const [queryTypes, setQueryTypes] = useState<QueryTypeEntry[]>([]);
+  const [drilldown, setDrilldown] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Any filter change resets paging back to the first page — the old offset
@@ -58,17 +73,21 @@ export default function App() {
     const off = offsetRef.current;
     if (showLoading) setLoading(true);
     try {
-      const [q, s, td, tc] = await Promise.all([
+      const [q, s, td, tc, ts, qt] = await Promise.all([
         api.queries(f, PAGE_SIZE, off),
         api.summary(f),
         api.topDomains(f),
         api.topClients(f),
+        api.timeseries(f),
+        api.queryTypes(f),
       ]);
       setRows(q.rows);
       setTotal(q.total);
       setSummary(s);
       setTopDomains(td);
       setTopClients(tc);
+      setSeries(ts);
+      setQueryTypes(qt);
       setError(null);
     } catch (e) {
       setError(
@@ -110,9 +129,12 @@ export default function App() {
         clients={clients}
         autoRefresh={autoRefresh}
         onToggleAutoRefresh={() => setAutoRefresh((v) => !v)}
+        csvHref={api.csvUrl(effectiveFilters)}
       />
 
       <SummaryCards summary={summary} />
+
+      <TimeSeriesChart data={series} loading={loading} />
 
       <div className="main-grid">
         <QueryTable
@@ -125,10 +147,19 @@ export default function App() {
           onNext={() => setOffset((o) => o + PAGE_SIZE)}
         />
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <TopList title="Top domains" entries={topDomains} />
+          <TopList title="Top domains" entries={topDomains} onSelect={setDrilldown} />
           <TopList title="Top clients" entries={topClients} />
+          <QueryTypeBreakdown entries={queryTypes} />
         </div>
       </div>
+
+      {drilldown && (
+        <DrilldownModal
+          domain={drilldown}
+          filters={effectiveFilters}
+          onClose={() => setDrilldown(null)}
+        />
+      )}
     </div>
   );
 }

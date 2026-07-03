@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import csv
+import io
 import os
 import time
 
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import db
@@ -61,6 +64,62 @@ def api_queries(
     rows = db.list_queries(client, domain, status, effective_since, until, limit, offset)
     total = db.count_queries(client, domain, status, effective_since, until)
     return {"total": total, "limit": limit, "offset": offset, "rows": rows}
+
+
+@app.get("/api/queries.csv")
+def api_queries_csv(
+    client: str | None = None,
+    domain: str | None = None,
+    status: str | None = None,
+    range: str | None = "1h",
+    since: int | None = None,
+    until: int | None = None,
+    limit: int = Query(10000, le=100000),
+):
+    """Export the current query view as CSV. Higher default cap than the paged
+    JSON endpoint since an export is expected to be the whole matching set."""
+    effective_since = _since_from_range(range, since)
+    rows = db.list_queries(client, domain, status, effective_since, until, limit, 0)
+
+    def generate():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        cols = ["timestamp", "time_utc", "client_ip", "client_name", "domain",
+                "query_type", "status", "raw_status"]
+        writer.writerow(cols)
+        for r in rows:
+            writer.writerow([
+                r["timestamp"],
+                time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(r["timestamp"])),
+                r["client_ip"], r["client_name"], r["domain"],
+                r["query_type"], r["status"], r["raw_status"],
+            ])
+        yield buf.getvalue()
+
+    filename = f"dns-watch-{int(time.time())}.csv"
+    return StreamingResponse(
+        generate(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/query-types")
+def api_query_types(client: str | None = None, range: str | None = "1h", since: int | None = None):
+    effective_since = _since_from_range(range, since)
+    return db.query_types(client, effective_since)
+
+
+@app.get("/api/timeseries")
+def api_timeseries(
+    client: str | None = None,
+    range: str | None = "1h",
+    since: int | None = None,
+    until: int | None = None,
+    buckets: int = Query(60, ge=1, le=500),
+):
+    effective_since = _since_from_range(range, since)
+    return db.timeseries(client, effective_since, until, buckets)
 
 
 @app.get("/api/summary")

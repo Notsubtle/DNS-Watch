@@ -36,6 +36,26 @@ export interface TopEntry {
   count: number;
 }
 
+export interface QueryTypeEntry {
+  type_code: number;
+  type: string;
+  count: number;
+}
+
+export interface TimeseriesPoint {
+  t: number;
+  allowed: number;
+  blocked: number;
+  total: number;
+}
+
+export interface Timeseries {
+  since: number;
+  until: number;
+  bucket_seconds: number;
+  series: TimeseriesPoint[];
+}
+
 export interface Filters {
   client: string; // "" = all
   domain: string;
@@ -83,4 +103,14 @@ export const api = {
 
   topClients: (f: Pick<Filters, "range">) =>
     getJson<TopEntry[]>(`/api/top-clients${qs({ range: f.range })}`),
+
+  queryTypes: (f: Pick<Filters, "client" | "range">) =>
+    getJson<QueryTypeEntry[]>(`/api/query-types${qs({ client: f.client, range: f.range })}`),
+
+  timeseries: (f: Pick<Filters, "client" | "range">, buckets = 60) =>
+    getJson<Timeseries>(`/api/timeseries${qs({ client: f.client, range: f.range, buckets })}`),
+
+  // Returns the download URL for the current filter view (browser handles the download).
+  csvUrl: (f: Filters) =>
+    `/api/queries.csv${qs({ client: f.client, domain: f.domain, status: f.status, range: f.range })}`,
 };

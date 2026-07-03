@@ -32,6 +32,21 @@ BLOCKED_STATUSES = {1, 4, 5, 6, 7, 8, 9, 10, 11, 16, 18, 19, 20, 21, 22, 23, 24,
 ALLOWED_STATUSES = {2, 3, 12, 13, 17}
 # Anything not in either set above is reported as "unknown" rather than guessed.
 
+# FTL's internal query-type enumeration (NOT DNS qtype numbers). Codes outside
+# this map are surfaced as "TYPE<n>" so a schema change shows up rather than
+# silently mislabelling.
+TYPE_NAMES = {
+    1: "A", 2: "AAAA", 3: "ANY", 4: "SRV", 5: "SOA", 6: "PTR", 7: "TXT",
+    8: "NAPTR", 9: "MX", 10: "DS", 11: "RRSIG", 12: "DNSKEY", 13: "NS",
+    14: "OTHER", 15: "SVCB", 16: "HTTPS",
+}
+
+
+def type_name(code: int | None) -> str:
+    if code is None:
+        return "?"
+    return TYPE_NAMES.get(code, f"TYPE{code}")
+
 
 @dataclass(frozen=True)
 class Schema:
@@ -293,6 +308,91 @@ def top_clients(since: int | None, limit: int = 15) -> list[dict]:
         {"ip": r["client_ip"], "name": r["client_name"] or r["client_ip"], "count": r["n"]}
         for r in rows
     ]
+
+
+def query_types(client: str | None, since: int | None, until: int | None = None) -> list[dict]:
+    """Count of queries grouped by FTL query type, most frequent first."""
+    _, join = _client_join_sql()
+    where_sql, params = _build_where(client=client, since=since, until=until)
+    sql = f"""
+        SELECT q.type AS type_code, COUNT(*) AS n
+        FROM queries q
+        {join}
+        WHERE {where_sql}
+        GROUP BY q.type
+        ORDER BY n DESC
+    """
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [
+        {"type_code": r["type_code"], "type": type_name(r["type_code"]), "count": r["n"]}
+        for r in rows
+    ]
+
+
+def timeseries(
+    client: str | None,
+    since: int | None,
+    until: int | None,
+    buckets: int = 60,
+) -> dict:
+    """Allowed/blocked query counts bucketed evenly across the time window.
+
+    Returns fixed-width buckets (including empty ones) so the frontend can draw
+    a continuous chart without inferring gaps. When `since` is unknown (range
+    "all"), the window is derived from the data's own min/max timestamp.
+    """
+    _, join = _client_join_sql()
+    blocked_in = ",".join(str(s) for s in BLOCKED_STATUSES)
+    allowed_in = ",".join(str(s) for s in ALLOWED_STATUSES)
+
+    # Resolve the window. `until` defaults to now; `since` falls back to the
+    # earliest matching row so "all" still produces a bounded chart.
+    win_until = until if until else int(time.time())
+    if since:
+        win_since = since
+    else:
+        base_where, base_params = _build_where(client=client, until=until)
+        with _connect() as conn:
+            row = conn.execute(
+                f"SELECT MIN(q.timestamp) AS mn FROM queries q {join} WHERE {base_where}",
+                base_params,
+            ).fetchone()
+        win_since = row["mn"] if row and row["mn"] is not None else win_until
+
+    span = max(1, win_until - win_since)
+    buckets = max(1, min(buckets, 500))
+    width = max(1, span // buckets)
+
+    where_sql, params = _build_where(client=client, since=win_since, until=win_until)
+    # Integer-divide the timestamp into bucket indexes, aggregate per bucket.
+    sql = f"""
+        SELECT
+            ((q.timestamp - ?) / ?) AS bucket,
+            SUM(CASE WHEN q.status IN ({allowed_in}) THEN 1 ELSE 0 END) AS allowed,
+            SUM(CASE WHEN q.status IN ({blocked_in}) THEN 1 ELSE 0 END) AS blocked,
+            COUNT(*) AS total
+        FROM queries q
+        {join}
+        WHERE {where_sql}
+        GROUP BY bucket
+        ORDER BY bucket
+    """
+    with _connect() as conn:
+        rows = conn.execute(sql, [win_since, width, *params]).fetchall()
+
+    by_bucket = {r["bucket"]: r for r in rows}
+    n = int((span // width)) + 1
+    series = []
+    for i in range(n):
+        r = by_bucket.get(i)
+        series.append({
+            "t": win_since + i * width,
+            "allowed": (r["allowed"] if r else 0) or 0,
+            "blocked": (r["blocked"] if r else 0) or 0,
+            "total": (r["total"] if r else 0) or 0,
+        })
+    return {"since": win_since, "until": win_until, "bucket_seconds": width, "series": series}
 
 
 def health() -> dict:
