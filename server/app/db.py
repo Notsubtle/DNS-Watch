@@ -495,6 +495,36 @@ def client_activity(
     return result
 
 
+def new_clients(after_ts: int) -> list[dict]:
+    """Clients whose *first-ever* query is at or after `after_ts`.
+
+    First-seen is the global MIN timestamp per client, so this surfaces devices
+    that genuinely appeared for the first time in the window — the signal the
+    new-device alert rule keys on.
+    """
+    select, join = _client_join_sql()
+    ccol = _client_ip_col()
+    sql = f"""
+        SELECT {select}, MIN(q.timestamp) AS first_seen, COUNT(*) AS total
+        FROM queries q
+        {join}
+        GROUP BY {ccol}
+        HAVING MIN(q.timestamp) >= ?
+        ORDER BY first_seen DESC
+    """
+    with _connect() as conn:
+        rows = conn.execute(sql, [after_ts]).fetchall()
+    return [
+        {
+            "ip": r["client_ip"],
+            "name": r["client_name"] or r["client_ip"],
+            "first_seen": r["first_seen"],
+            "total": r["total"],
+        }
+        for r in rows
+    ]
+
+
 def health() -> dict:
     try:
         with _connect() as conn:

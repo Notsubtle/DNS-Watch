@@ -9,7 +9,15 @@ services:
       - "${DASHBOARD_PORT:-8090}:8090"
     environment:
       PIHOLE_DB_PATH: /pihole-data/pihole-FTL.db
+      # Writable store for DNS Watch's own state (alert rules + fired events).
+      # Kept entirely separate from Pi-hole's database.
+      DNSWATCH_DB_PATH: /data/dnswatch.db
     volumes:
       # Read-only mount of Pi-hole's data folder. ':ro' is critical — this
       # process must never be able to write to Pi-hole's database.
       - ${PIHOLE_ETC_PATH}:/pihole-data:ro
+      # Writable named volume for alert rules/events only.
+      - dnswatch-data:/data
+
+volumes:
+  dnswatch-data:

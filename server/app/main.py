@@ -5,19 +5,20 @@ import io
 import os
 import time
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
-from app import db
+from app import alerts, db
 
 app = FastAPI(title="DNS Watch")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # LAN-only tool behind your own firewall; see README hardening notes
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -149,6 +150,56 @@ def api_client_activity(
 ):
     effective_since = _since_from_range(range, since)
     return db.client_activity(effective_since, None, limit, buckets)
+
+
+class RuleCreate(BaseModel):
+    name: str
+    type: str
+    params: dict = {}
+    enabled: bool = True
+
+
+class RuleUpdate(BaseModel):
+    name: str | None = None
+    enabled: bool | None = None
+    params: dict | None = None
+
+
+@app.get("/api/alerts")
+def api_alerts(limit: int = Query(50, ge=1, le=200)):
+    """Evaluate enabled rules against current data, then return recent events."""
+    fired = alerts.evaluate()
+    return {"evaluated_at": int(time.time()), "new": len(fired), "events": alerts.list_events(limit)}
+
+
+@app.get("/api/alert-rules")
+def api_list_rules():
+    return alerts.list_rules()
+
+
+@app.post("/api/alert-rules")
+def api_create_rule(rule: RuleCreate):
+    try:
+        return alerts.create_rule(rule.name, rule.type, rule.params, rule.enabled)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.patch("/api/alert-rules/{rule_id}")
+def api_update_rule(rule_id: int, patch: RuleUpdate):
+    updated = alerts.update_rule(
+        rule_id, name=patch.name, enabled=patch.enabled, params=patch.params
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="rule not found")
+    return updated
+
+
+@app.delete("/api/alert-rules/{rule_id}")
+def api_delete_rule(rule_id: int):
+    if not alerts.delete_rule(rule_id):
+        raise HTTPException(status_code=404, detail="rule not found")
+    return {"deleted": rule_id}
 
 
 # Serve the built frontend (Docker build copies web/dist here). In local dev,

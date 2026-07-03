@@ -65,6 +65,33 @@ export interface Timeseries {
   series: TimeseriesPoint[];
 }
 
+export type RuleType = "volume_threshold" | "new_device" | "domain_keyword";
+
+export interface AlertRule {
+  id: number;
+  name: string;
+  type: RuleType;
+  enabled: boolean;
+  params: Record<string, unknown>;
+  created_at: number;
+}
+
+export interface AlertEvent {
+  id: number;
+  rule_id: number | null;
+  rule_name: string;
+  type: RuleType;
+  severity: "info" | "warning" | "critical";
+  message: string;
+  created_at: number;
+}
+
+export interface AlertsResponse {
+  evaluated_at: number;
+  new: number;
+  events: AlertEvent[];
+}
+
 export interface Filters {
   client: string; // "" = all
   domain: string;
@@ -84,6 +111,16 @@ function qs(params: Record<string, string | number | undefined>): string {
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${url} -> ${res.status}`);
+  return res.json() as Promise<T>;
+}
+
+async function sendJson<T>(url: string, method: string, body?: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error(`${method} ${url} -> ${res.status}`);
   return res.json() as Promise<T>;
 }
 
@@ -127,4 +164,12 @@ export const api = {
   // Returns the download URL for the current filter view (browser handles the download).
   csvUrl: (f: Filters) =>
     `/api/queries.csv${qs({ client: f.client, domain: f.domain, status: f.status, range: f.range })}`,
+
+  alerts: (limit = 50) => getJson<AlertsResponse>(`/api/alerts${qs({ limit })}`),
+  listRules: () => getJson<AlertRule[]>("/api/alert-rules"),
+  createRule: (r: { name: string; type: RuleType; params: Record<string, unknown>; enabled?: boolean }) =>
+    sendJson<AlertRule>("/api/alert-rules", "POST", r),
+  updateRule: (id: number, patch: { name?: string; enabled?: boolean; params?: Record<string, unknown> }) =>
+    sendJson<AlertRule>(`/api/alert-rules/${id}`, "PATCH", patch),
+  deleteRule: (id: number) => sendJson<{ deleted: number }>(`/api/alert-rules/${id}`, "DELETE"),
 };

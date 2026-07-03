@@ -58,7 +58,10 @@ Dashboard: `http://<ubuntu-host-ip>:8090`
 # backend
 cd server
 pip install -e . --break-system-packages
-PIHOLE_DB_PATH=/path/to/pihole-FTL.db uvicorn app.main:app --reload --port 8090
+# DNSWATCH_DB_PATH is where alert rules/events are stored; point it somewhere
+# writable in local dev (it defaults to /data/dnswatch.db, the Docker volume).
+PIHOLE_DB_PATH=/path/to/pihole-FTL.db DNSWATCH_DB_PATH=./dnswatch.db \
+  uvicorn app.main:app --reload --port 8090
 
 # frontend (separate terminal)
 cd web
@@ -75,6 +78,19 @@ npm run dev    # http://localhost:5173, proxies /api to :8090
 - **Summary cards** — total queries, blocked %, unique clients, unique domains for
   the current filter/time window.
 - **Top domains / top clients** — ranked lists for the current filter window.
+  Top clients show a per-client activity **sparkline** and a **NEW** badge for
+  devices first seen in the last 24h. Click a top domain to open a **drill-down**
+  showing which clients queried it.
+- **Query-volume chart** — a time-series of allowed vs. blocked queries across the
+  selected range, bucketed and hoverable.
+- **Query-type breakdown** — A / AAAA / HTTPS / PTR / … distribution.
+- **CSV export** — download the current filtered query view.
+- **Pagination** — the query log is paged with an exact total ("201–400 of 5,000").
+- **Alert rules** — watch for query-volume spikes (per-client or overall), new
+  devices, or specific domain keywords. Fired alerts show in the Alerts panel.
+  Rules and events are stored in DNS Watch's **own** writable SQLite database
+  (`DNSWATCH_DB_PATH`, default `/data/dnswatch.db`, mounted as the `dnswatch-data`
+  volume) — Pi-hole's database is still only ever opened read-only.
 - **Client naming** — pulls names Pi-hole already knows (from DHCP lease / your
   manual naming in Pi-hole's own UI); no separate naming step needed.
 

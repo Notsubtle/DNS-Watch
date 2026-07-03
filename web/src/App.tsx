@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  AlertEvent,
   api,
   ClientActivity,
   ClientInfo,
@@ -18,6 +19,8 @@ import ClientList from "./components/ClientList";
 import TimeSeriesChart from "./components/TimeSeriesChart";
 import QueryTypeBreakdown from "./components/QueryTypeBreakdown";
 import DrilldownModal from "./components/DrilldownModal";
+import AlertsPanel from "./components/AlertsPanel";
+import RulesModal from "./components/RulesModal";
 
 const REFRESH_MS = 5000;
 const PAGE_SIZE = 200;
@@ -40,7 +43,9 @@ export default function App() {
   const [topClients, setTopClients] = useState<ClientActivity[]>([]);
   const [series, setSeries] = useState<Timeseries | null>(null);
   const [queryTypes, setQueryTypes] = useState<QueryTypeEntry[]>([]);
+  const [alertEvents, setAlertEvents] = useState<AlertEvent[]>([]);
   const [drilldown, setDrilldown] = useState<string | null>(null);
+  const [rulesOpen, setRulesOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Any filter change resets paging back to the first page — the old offset
@@ -75,13 +80,14 @@ export default function App() {
     const off = offsetRef.current;
     if (showLoading) setLoading(true);
     try {
-      const [q, s, td, tc, ts, qt] = await Promise.all([
+      const [q, s, td, tc, ts, qt, al] = await Promise.all([
         api.queries(f, PAGE_SIZE, off),
         api.summary(f),
         api.topDomains(f),
         api.clientActivity(f),
         api.timeseries(f),
         api.queryTypes(f),
+        api.alerts(),
       ]);
       setRows(q.rows);
       setTotal(q.total);
@@ -90,6 +96,7 @@ export default function App() {
       setTopClients(tc);
       setSeries(ts);
       setQueryTypes(qt);
+      setAlertEvents(al.events);
       setError(null);
     } catch (e) {
       setError(
@@ -98,6 +105,16 @@ export default function App() {
       );
     } finally {
       if (showLoading) setLoading(false);
+    }
+  }
+
+  // Re-evaluate alerts on demand (after a rule is added/toggled/removed).
+  async function reloadAlerts() {
+    try {
+      const al = await api.alerts();
+      setAlertEvents(al.events);
+    } catch {
+      /* surfaced by the main refresh loop */
     }
   }
 
@@ -136,6 +153,8 @@ export default function App() {
 
       <SummaryCards summary={summary} />
 
+      <AlertsPanel events={alertEvents} onManageRules={() => setRulesOpen(true)} />
+
       <TimeSeriesChart data={series} loading={loading} />
 
       <div className="main-grid">
@@ -161,6 +180,10 @@ export default function App() {
           filters={effectiveFilters}
           onClose={() => setDrilldown(null)}
         />
+      )}
+
+      {rulesOpen && (
+        <RulesModal onClose={() => setRulesOpen(false)} onChange={reloadAlerts} />
       )}
     </div>
   );
