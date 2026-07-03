@@ -8,6 +8,13 @@ export interface QueryRow {
   client_name: string;
 }
 
+export interface QueriesResponse {
+  total: number;
+  limit: number;
+  offset: number;
+  rows: QueryRow[];
+}
+
 export interface ClientInfo {
   ip: string;
   name: string;
@@ -56,14 +63,15 @@ export const api = {
 
   clients: () => getJson<ClientInfo[]>("/api/clients"),
 
-  queries: (f: Filters, limit = 200) =>
-    getJson<QueryRow[]>(
+  queries: (f: Filters, limit = 200, offset = 0) =>
+    getJson<QueriesResponse>(
       `/api/queries${qs({
         client: f.client,
         domain: f.domain,
         status: f.status,
         range: f.range,
         limit,
+        offset,
       })}`
     ),
 

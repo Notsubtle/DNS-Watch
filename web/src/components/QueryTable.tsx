@@ -5,10 +5,33 @@ function formatTime(ts: number): string {
   return d.toLocaleTimeString([], { hour12: false });
 }
 
-export default function QueryTable({ rows }: { rows: QueryRow[] }) {
+interface Props {
+  rows: QueryRow[];
+  total: number;
+  offset: number;
+  pageSize: number;
+  loading: boolean;
+  onPrev: () => void;
+  onNext: () => void;
+}
+
+export default function QueryTable({ rows, total, offset, pageSize, loading, onPrev, onNext }: Props) {
+  const start = total === 0 ? 0 : offset + 1;
+  const end = offset + rows.length;
+  const hasPrev = offset > 0;
+  const hasNext = offset + pageSize < total;
+
   return (
     <div className="panel">
-      <h2>Live query log ({rows.length})</h2>
+      <div className="panel-head">
+        <h2>
+          Live query log
+          {loading && <span className="spinner" aria-label="Loading" />}
+        </h2>
+        <span className="row-count">
+          {total > 0 ? `${start.toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()}` : "0 results"}
+        </span>
+      </div>
       <table>
         <thead>
           <tr>
@@ -40,6 +63,19 @@ export default function QueryTable({ rows }: { rows: QueryRow[] }) {
           )}
         </tbody>
       </table>
+      {total > pageSize && (
+        <div className="pager">
+          <button onClick={onPrev} disabled={!hasPrev || loading}>
+            ← Newer
+          </button>
+          <span className="pager-info">
+            Page {Math.floor(offset / pageSize) + 1} of {Math.max(1, Math.ceil(total / pageSize))}
+          </span>
+          <button onClick={onNext} disabled={!hasNext || loading}>
+            Older →
+          </button>
+        </div>
+      )}
     </div>
   );
 }

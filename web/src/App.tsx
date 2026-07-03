@@ -6,9 +6,10 @@ import QueryTable from "./components/QueryTable";
 import TopList from "./components/TopList";
 
 const REFRESH_MS = 5000;
+const PAGE_SIZE = 200;
 
 export default function App() {
-  const [filters, setFilters] = useState<Filters>({
+  const [filters, setFiltersState] = useState<Filters>({
     client: "",
     domain: "",
     status: "all",
@@ -17,10 +18,20 @@ export default function App() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [clients, setClients] = useState<ClientInfo[]>([]);
   const [rows, setRows] = useState<QueryRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [topDomains, setTopDomains] = useState<TopEntry[]>([]);
   const [topClients, setTopClients] = useState<TopEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+
+  // Any filter change resets paging back to the first page — the old offset
+  // rarely makes sense against a different result set.
+  function setFilters(f: Filters) {
+    setFiltersState(f);
+    setOffset(0);
+  }
 
   // Debounce the domain search so we're not hitting the API on every keystroke
   const [debouncedDomain, setDebouncedDomain] = useState(filters.domain);
@@ -32,21 +43,29 @@ export default function App() {
   const effectiveFilters = { ...filters, domain: debouncedDomain };
   const filtersRef = useRef(effectiveFilters);
   filtersRef.current = effectiveFilters;
+  const offsetRef = useRef(offset);
+  offsetRef.current = offset;
 
   useEffect(() => {
     api.clients().then(setClients).catch(() => {});
   }, []);
 
-  async function refresh() {
+  // `showLoading` distinguishes user-initiated fetches (filter/page changes),
+  // which get a spinner, from the silent 5s background poll, which shouldn't
+  // flash the table every tick.
+  async function refresh(showLoading: boolean) {
     const f = filtersRef.current;
+    const off = offsetRef.current;
+    if (showLoading) setLoading(true);
     try {
       const [q, s, td, tc] = await Promise.all([
-        api.queries(f),
+        api.queries(f, PAGE_SIZE, off),
         api.summary(f),
         api.topDomains(f),
         api.topClients(f),
       ]);
-      setRows(q);
+      setRows(q.rows);
+      setTotal(q.total);
       setSummary(s);
       setTopDomains(td);
       setTopClients(tc);
@@ -56,18 +75,20 @@ export default function App() {
         "Can't reach the DNS Watch backend or Pi-hole's database. Check that the container is " +
           "running and PIHOLE_ETC_PATH points at the right folder. (" + (e as Error).message + ")"
       );
+    } finally {
+      if (showLoading) setLoading(false);
     }
   }
 
   useEffect(() => {
-    refresh();
-  }, [filters.client, filters.status, filters.range, debouncedDomain]);
+    refresh(true);
+  }, [filters.client, filters.status, filters.range, debouncedDomain, offset]);
 
   useEffect(() => {
     if (!autoRefresh) return;
-    const id = setInterval(refresh, REFRESH_MS);
+    const id = setInterval(() => refresh(false), REFRESH_MS);
     return () => clearInterval(id);
-  }, [autoRefresh, filters.client, filters.status, filters.range, debouncedDomain]);
+  }, [autoRefresh, filters.client, filters.status, filters.range, debouncedDomain, offset]);
 
   return (
     <div className="app">
@@ -94,7 +115,15 @@ export default function App() {
       <SummaryCards summary={summary} />
 
       <div className="main-grid">
-        <QueryTable rows={rows} />
+        <QueryTable
+          rows={rows}
+          total={total}
+          offset={offset}
+          pageSize={PAGE_SIZE}
+          loading={loading}
+          onPrev={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+          onNext={() => setOffset((o) => o + PAGE_SIZE)}
+        />
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <TopList title="Top domains" entries={topDomains} />
           <TopList title="Top clients" entries={topClients} />

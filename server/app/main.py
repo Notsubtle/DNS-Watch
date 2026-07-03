@@ -58,7 +58,9 @@ def api_queries(
     offset: int = 0,
 ):
     effective_since = _since_from_range(range, since)
-    return db.list_queries(client, domain, status, effective_since, until, limit, offset)
+    rows = db.list_queries(client, domain, status, effective_since, until, limit, offset)
+    total = db.count_queries(client, domain, status, effective_since, until)
+    return {"total": total, "limit": limit, "offset": offset, "rows": rows}
 
 
 @app.get("/api/summary")

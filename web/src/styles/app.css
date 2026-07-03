@@ -149,6 +149,70 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.4px;
   margin: 0 0 10px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.panel-head h2 {
+  margin-bottom: 10px;
+}
+
+.row-count {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+/* Small inline loading spinner shown during user-initiated fetches */
+.spinner {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--ink-border);
+  border-top-color: var(--ink-blue);
+  border-radius: 50%;
+  display: inline-block;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.pager button {
+  background: var(--ink-blue-bg);
+  color: var(--ink-blue);
+  border: 1px solid var(--ink-blue);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.pager button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pager-info {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-muted);
 }
 
 table {

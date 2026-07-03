@@ -68,6 +68,17 @@ def _client_join_sql() -> tuple[str, str]:
     return select, join
 
 
+def _client_ip_col() -> str:
+    """The real column holding the client IP, for use in WHERE/GROUP BY.
+
+    We filter on the underlying column rather than the `client_ip` SELECT alias
+    so the same filter works in aggregate queries (COUNT(*), SUM(...)) that
+    don't project the alias — SQLite only resolves output aliases in WHERE when
+    they're present in the SELECT list.
+    """
+    return "c.ip" if detect_schema().has_client_table else "q.client"
+
+
 def _status_case() -> str:
     blocked = ",".join(str(s) for s in BLOCKED_STATUSES)
     allowed = ",".join(str(s) for s in ALLOWED_STATUSES)
@@ -78,13 +89,67 @@ def _status_case() -> str:
     )
 
 
+def _status_where(status: str | None) -> str | None:
+    """SQL predicate (no params) restricting q.status to a resolved category.
+
+    Returns None for "all"/None so no status restriction is applied. Filtering
+    in SQL (rather than post-filtering fetched rows in Python) is what lets
+    LIMIT/OFFSET and COUNT(*) stay correct for status-filtered views.
+    """
+    if not status or status == "all":
+        return None
+    blocked = ",".join(str(s) for s in BLOCKED_STATUSES)
+    allowed = ",".join(str(s) for s in ALLOWED_STATUSES)
+    if status == "blocked":
+        return f"q.status IN ({blocked})"
+    if status == "allowed":
+        return f"q.status IN ({allowed})"
+    if status == "unknown":
+        return f"q.status NOT IN ({blocked},{allowed})"
+    return None
+
+
+def _build_where(
+    client: str | None = None,
+    domain: str | None = None,
+    status: str | None = None,
+    since: int | None = None,
+    until: int | None = None,
+) -> tuple[str, list]:
+    """Shared WHERE-clause builder used by every filtered query.
+
+    Centralising this keeps list/count/summary/top-* in lockstep so a filter
+    added in one place can't silently diverge from the totals shown elsewhere.
+    Returns (where_sql, params); where_sql always starts with "1=1" so callers
+    can drop it into `WHERE {where_sql}` unconditionally.
+    """
+    where = ["1=1"]
+    params: list = []
+    if client:
+        where.append(f"{_client_ip_col()} = ?")
+        params.append(client)
+    if domain:
+        where.append("q.domain LIKE ?")
+        params.append(f"%{domain}%")
+    if since:
+        where.append("q.timestamp >= ?")
+        params.append(since)
+    if until:
+        where.append("q.timestamp <= ?")
+        params.append(until)
+    status_pred = _status_where(status)
+    if status_pred:
+        where.append(status_pred)
+    return " AND ".join(where), params
+
+
 def list_clients() -> list[dict]:
     select, join = _client_join_sql()
     sql = f"""
         SELECT {select}, COUNT(*) AS query_count
         FROM queries q
         {join}
-        GROUP BY client_ip
+        GROUP BY {_client_ip_col()}
         ORDER BY query_count DESC
     """
     with _connect() as conn:
@@ -110,36 +175,22 @@ def list_queries(
 ) -> list[dict]:
     select, join = _client_join_sql()
     status_case = _status_case()
-    where = ["1=1"]
-    params: list = []
-
-    if client:
-        where.append("client_ip = ?")
-        params.append(client)
-    if domain:
-        where.append("q.domain LIKE ?")
-        params.append(f"%{domain}%")
-    if since:
-        where.append("q.timestamp >= ?")
-        params.append(since)
-    if until:
-        where.append("q.timestamp <= ?")
-        params.append(until)
+    where_sql, params = _build_where(client, domain, status, since, until)
 
     sql = f"""
         SELECT q.timestamp, q.domain, q.type, q.status, {status_case}, {select}
         FROM queries q
         {join}
-        WHERE {' AND '.join(where)}
+        WHERE {where_sql}
         ORDER BY q.timestamp DESC
         LIMIT ? OFFSET ?
     """
-    params.extend([limit, offset])
+    params = [*params, limit, offset]
 
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
 
-    results = [
+    return [
         {
             "timestamp": r["timestamp"],
             "domain": r["domain"],
@@ -152,71 +203,71 @@ def list_queries(
         for r in rows
     ]
 
-    if status and status != "all":
-        results = [r for r in results if r["status"] == status]
 
-    return results
+def count_queries(
+    client: str | None,
+    domain: str | None,
+    status: str | None,
+    since: int | None,
+    until: int | None,
+) -> int:
+    """Total rows matching the same filters as list_queries, ignoring paging.
+
+    Lets the frontend show "showing 200 of 5,000" and build pager controls.
+    """
+    _, join = _client_join_sql()
+    where_sql, params = _build_where(client, domain, status, since, until)
+    sql = f"SELECT COUNT(*) AS n FROM queries q {join} WHERE {where_sql}"
+    with _connect() as conn:
+        return conn.execute(sql, params).fetchone()["n"]
 
 
 def summary(client: str | None, since: int | None, until: int | None) -> dict:
-    select, join = _client_join_sql()
-    status_case = _status_case()
-    where = ["1=1"]
-    params: list = []
-    if client:
-        where.append("client_ip = ?")
-        params.append(client)
-    if since:
-        where.append("q.timestamp >= ?")
-        params.append(since)
-    if until:
-        where.append("q.timestamp <= ?")
-        params.append(until)
+    _, join = _client_join_sql()
+    where_sql, params = _build_where(client=client, since=since, until=until)
+    blocked_in = ",".join(str(s) for s in BLOCKED_STATUSES)
+    client_col = _client_ip_col()
 
+    # Aggregate in SQLite rather than pulling every matching row into Python —
+    # this stays flat as retention grows (maxDBdays defaults to 365).
     sql = f"""
-        SELECT {status_case}, {select}, q.domain
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN q.status IN ({blocked_in}) THEN 1 ELSE 0 END) AS blocked,
+            COUNT(DISTINCT {client_col}) AS unique_clients,
+            COUNT(DISTINCT q.domain) AS unique_domains
         FROM queries q
         {join}
-        WHERE {' AND '.join(where)}
+        WHERE {where_sql}
     """
     with _connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
+        r = conn.execute(sql, params).fetchone()
 
-    total = len(rows)
-    blocked = sum(1 for r in rows if r["resolved_status"] == "blocked")
-    unique_clients = len({r["client_ip"] for r in rows})
-    unique_domains = len({r["domain"] for r in rows})
-
+    total = r["total"] or 0
+    blocked = r["blocked"] or 0
     return {
         "total_queries": total,
         "blocked": blocked,
         "blocked_pct": round((blocked / total) * 100, 1) if total else 0.0,
-        "unique_clients": unique_clients,
-        "unique_domains": unique_domains,
+        "unique_clients": r["unique_clients"] or 0,
+        "unique_domains": r["unique_domains"] or 0,
     }
 
 
 def top_domains(client: str | None, since: int | None, limit: int = 15) -> list[dict]:
-    select, join = _client_join_sql()
-    where = ["1=1"]
-    params: list = []
-    if client:
-        where.append("client_ip = ?")
-        params.append(client)
-    if since:
-        where.append("q.timestamp >= ?")
-        params.append(since)
+    _, join = _client_join_sql()
+    where_sql, params = _build_where(client=client, since=since)
 
     sql = f"""
-        SELECT q.domain, {select}, COUNT(*) AS n
+        SELECT q.domain, COUNT(*) AS n
         FROM queries q
         {join}
-        WHERE {' AND '.join(where)}
+        WHERE {where_sql}
         GROUP BY q.domain
         ORDER BY n DESC
         LIMIT ?
     """
-    params.append(limit)
+    params = [*params, limit]
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
     return [{"domain": r["domain"], "count": r["n"]} for r in rows]
@@ -224,22 +275,18 @@ def top_domains(client: str | None, since: int | None, limit: int = 15) -> list[
 
 def top_clients(since: int | None, limit: int = 15) -> list[dict]:
     select, join = _client_join_sql()
-    where = ["1=1"]
-    params: list = []
-    if since:
-        where.append("q.timestamp >= ?")
-        params.append(since)
+    where_sql, params = _build_where(since=since)
 
     sql = f"""
         SELECT {select}, COUNT(*) AS n
         FROM queries q
         {join}
-        WHERE {' AND '.join(where)}
-        GROUP BY client_ip
+        WHERE {where_sql}
+        GROUP BY {_client_ip_col()}
         ORDER BY n DESC
         LIMIT ?
     """
-    params.append(limit)
+    params = [*params, limit]
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
     return [
