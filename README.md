@@ -19,6 +19,35 @@ dns-dashboard/
   web/                   <- Vite + React + TypeScript frontend
 ```
 
+## Who it's for & what it solves
+
+Pi-hole tells you *how much* is being blocked across your whole network. DNS Watch
+answers the two questions it doesn't: **"what is *this device* doing?"** and **"tell
+me when something changes — without me watching."**
+
+It's aimed at anyone running Pi-hole on a home or homelab network who wants
+per-device visibility and wants to be *notified* about changes rather than have to
+go looking:
+
+- **Privacy-minded** — see which smart TV, speaker, or doorbell phones home the
+  most, and to which trackers.
+- **Parents / households** — watch what a specific device is doing, or get alerted
+  when it hits domains you care about.
+- **Security hobbyists** — get flagged when a **new/unknown device** joins, when a
+  device's query volume **spikes** (possible malware or DNS exfiltration), or when a
+  normally-active device **goes quiet** (offline or tampered with).
+- **Tinkerers** — a filterable, per-client live log for debugging a chatty device or
+  a false-positive block.
+
+The feature that makes it more than a prettier Pi-hole dashboard is **headless
+alerting**: rules are evaluated server-side on a timer and pushed out via webhook,
+so it *tells you* about things instead of only showing them when you happen to look.
+
+**Honest scope:** DNS Watch *observes* — it doesn't block (Pi-hole does that) and it
+isn't a full intrusion-detection system. It only sees DNS *names* that actually pass
+through Pi-hole, so a device using DoH (DNS-over-HTTPS), a hardcoded resolver, or a
+VPN bypasses Pi-hole and won't show up here.
+
 ## Why DNS Watch, when Pi-hole already has a dashboard?
 
 Pi-hole's built-in admin UI is genuinely good, and DNS Watch is **not a replacement**
