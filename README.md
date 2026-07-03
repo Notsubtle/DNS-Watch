@@ -4,6 +4,8 @@ A small, self-hosted dashboard that sits **next to** your existing Pi-hole conta
 reads its query database directly, and gives you a filterable, live view of which
 device is visiting which domain.
 
+![DNS Watch dashboard](docs/screenshots/dashboard.png)
+
 Visual style borrows the "ink" dark palette from the Jooce dashboard project (same
 CSS variable approach), but this is a fresh, purpose-built app — different data
 model entirely (DNS queries/clients, not coding sessions).
@@ -48,6 +50,20 @@ What it adds on top of Pi-hole's dashboard:
 
 In short: keep Pi-hole for **controlling** DNS; add DNS Watch for **observing and
 being alerted about** per-client activity.
+
+## Screenshots
+
+Click a client for its full profile — its own volume chart, top domains, query
+types, and first/last-seen:
+
+![Per-client detail](docs/screenshots/client-detail.png)
+
+Optional webhook alert delivery (ntfy / Home Assistant / Slack / Discord), with a
+"Send test" button:
+
+![Settings — webhook delivery](docs/screenshots/settings.png)
+
+> Screenshots use synthetic sample data, not a real network.
 
 ## How it works
 
