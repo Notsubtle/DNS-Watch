@@ -510,3 +510,64 @@ tr:hover td {
   padding: 1px 6px;
   margin-left: 8px;
 }
+
+/* Client list with sparklines + new-device badge */
+.client-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.client-list li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--ink-border);
+  font-size: 13px;
+}
+
+.client-list li:last-child {
+  border-bottom: none;
+}
+
+.client-list .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.client-list .count {
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.sparkline {
+  display: block;
+}
+
+.sparkline .spark-area {
+  fill: var(--ink-blue);
+  fill-opacity: 0.18;
+}
+
+.sparkline .spark-line {
+  stroke: var(--ink-blue);
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.new-badge {
+  display: inline-block;
+  margin-left: 8px;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--ink-amber-bg);
+  color: var(--ink-amber);
+}

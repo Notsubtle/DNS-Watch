@@ -395,6 +395,106 @@ def timeseries(
     return {"since": win_since, "until": win_until, "bucket_seconds": width, "series": series}
 
 
+def client_activity(
+    since: int | None,
+    until: int | None,
+    limit: int = 10,
+    buckets: int = 20,
+) -> list[dict]:
+    """Top clients in the window, each with a sparkline and a global first-seen.
+
+    `first_seen` is the earliest timestamp for that client across the WHOLE db
+    (not just the window), so the frontend can flag genuinely-new devices rather
+    than ones that merely happen to be quiet earlier in the range.
+    """
+    select, join = _client_join_sql()
+    ccol = _client_ip_col()
+
+    win_until = until if until else int(time.time())
+    if since:
+        win_since = since
+    else:
+        base_where, base_params = _build_where(until=until)
+        with _connect() as conn:
+            mn = conn.execute(
+                f"SELECT MIN(q.timestamp) AS mn FROM queries q {join} WHERE {base_where}",
+                base_params,
+            ).fetchone()["mn"]
+        win_since = mn if mn is not None else win_until
+
+    span = max(1, win_until - win_since)
+    buckets = max(1, min(buckets, 200))
+    width = max(1, span // buckets)
+    n_buckets = int(span // width) + 1
+
+    where_sql, params = _build_where(since=win_since, until=win_until)
+    with _connect() as conn:
+        # 1) Top N clients in the window.
+        top = conn.execute(
+            f"""
+            SELECT {select}, COUNT(*) AS n, MAX(q.timestamp) AS last_seen
+            FROM queries q
+            {join}
+            WHERE {where_sql}
+            GROUP BY {ccol}
+            ORDER BY n DESC
+            LIMIT ?
+            """,
+            [*params, limit],
+        ).fetchall()
+
+        if not top:
+            return []
+
+        ips = [t["client_ip"] for t in top]
+        placeholders = ",".join("?" for _ in ips)
+
+        # 2) Global first-seen for just those clients (one grouped query).
+        firsts = {
+            r["ipcol"]: r["fs"]
+            for r in conn.execute(
+                f"""
+                SELECT {ccol} AS ipcol, MIN(q.timestamp) AS fs
+                FROM queries q
+                {join}
+                WHERE {ccol} IN ({placeholders})
+                GROUP BY {ccol}
+                """,
+                ips,
+            ).fetchall()
+        }
+
+        # 3) Sparkline buckets for all top clients at once.
+        spark_rows = conn.execute(
+            f"""
+            SELECT {ccol} AS ipcol, ((q.timestamp - ?) / ?) AS bucket, COUNT(*) AS n
+            FROM queries q
+            {join}
+            WHERE {where_sql} AND {ccol} IN ({placeholders})
+            GROUP BY ipcol, bucket
+            """,
+            [win_since, width, *params, *ips],
+        ).fetchall()
+
+    spark_by_ip: dict = {}
+    for r in spark_rows:
+        spark_by_ip.setdefault(r["ipcol"], {})[r["bucket"]] = r["n"]
+
+    result = []
+    for t in top:
+        ip = t["client_ip"]
+        bmap = spark_by_ip.get(ip, {})
+        result.append({
+            "ip": ip,
+            "name": t["client_name"] or ip,
+            "count": t["n"],
+            "first_seen": firsts.get(ip),
+            "last_seen": t["last_seen"],
+            "sparkline": [bmap.get(i, 0) for i in range(n_buckets)],
+        })
+    return result
+
+
 def health() -> dict:
     try:
         with _connect() as conn:

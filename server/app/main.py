@@ -140,6 +140,17 @@ def api_top_clients(range: str | None = "1h", limit: int = 15):
     return db.top_clients(effective_since, limit)
 
 
+@app.get("/api/client-activity")
+def api_client_activity(
+    range: str | None = "1h",
+    since: int | None = None,
+    limit: int = Query(10, ge=1, le=50),
+    buckets: int = Query(20, ge=1, le=200),
+):
+    effective_since = _since_from_range(range, since)
+    return db.client_activity(effective_since, None, limit, buckets)
+
+
 # Serve the built frontend (Docker build copies web/dist here). In local dev,
 # this path won't exist and the frontend is served separately by Vite instead.
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")

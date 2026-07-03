@@ -36,6 +36,15 @@ export interface TopEntry {
   count: number;
 }
 
+export interface ClientActivity {
+  ip: string;
+  name: string;
+  count: number;
+  first_seen: number | null;
+  last_seen: number | null;
+  sparkline: number[];
+}
+
 export interface QueryTypeEntry {
   type_code: number;
   type: string;
@@ -103,6 +112,11 @@ export const api = {
 
   topClients: (f: Pick<Filters, "range">) =>
     getJson<TopEntry[]>(`/api/top-clients${qs({ range: f.range })}`),
+
+  clientActivity: (f: Pick<Filters, "range">, limit = 10, buckets = 20) =>
+    getJson<ClientActivity[]>(
+      `/api/client-activity${qs({ range: f.range, limit, buckets })}`
+    ),
 
   queryTypes: (f: Pick<Filters, "client" | "range">) =>
     getJson<QueryTypeEntry[]>(`/api/query-types${qs({ client: f.client, range: f.range })}`),

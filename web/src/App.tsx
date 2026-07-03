@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   api,
+  ClientActivity,
   ClientInfo,
   Filters,
   QueryRow,
@@ -13,6 +14,7 @@ import FilterBar from "./components/FilterBar";
 import SummaryCards from "./components/SummaryCards";
 import QueryTable from "./components/QueryTable";
 import TopList from "./components/TopList";
+import ClientList from "./components/ClientList";
 import TimeSeriesChart from "./components/TimeSeriesChart";
 import QueryTypeBreakdown from "./components/QueryTypeBreakdown";
 import DrilldownModal from "./components/DrilldownModal";
@@ -35,7 +37,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [topDomains, setTopDomains] = useState<TopEntry[]>([]);
-  const [topClients, setTopClients] = useState<TopEntry[]>([]);
+  const [topClients, setTopClients] = useState<ClientActivity[]>([]);
   const [series, setSeries] = useState<Timeseries | null>(null);
   const [queryTypes, setQueryTypes] = useState<QueryTypeEntry[]>([]);
   const [drilldown, setDrilldown] = useState<string | null>(null);
@@ -77,7 +79,7 @@ export default function App() {
         api.queries(f, PAGE_SIZE, off),
         api.summary(f),
         api.topDomains(f),
-        api.topClients(f),
+        api.clientActivity(f),
         api.timeseries(f),
         api.queryTypes(f),
       ]);
@@ -148,7 +150,7 @@ export default function App() {
         />
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <TopList title="Top domains" entries={topDomains} onSelect={setDrilldown} />
-          <TopList title="Top clients" entries={topClients} />
+          <ClientList clients={topClients} />
           <QueryTypeBreakdown entries={queryTypes} />
         </div>
       </div>
