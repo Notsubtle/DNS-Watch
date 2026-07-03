@@ -3,7 +3,9 @@ from __future__ import annotations
 import csv
 import io
 import os
+import threading
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +15,38 @@ from pydantic import BaseModel
 
 from app import alerts, db
 
-app = FastAPI(title="DNS Watch")
+# How often the server evaluates alert rules on its own, independent of any open
+# dashboard. This is what makes alerting/webhooks work headless. Set to 0 to
+# disable and fall back to only-when-the-frontend-polls behaviour.
+ALERT_EVAL_INTERVAL = int(os.environ.get("ALERT_EVAL_INTERVAL_SECONDS", "60"))
+
+_scheduler_stop = threading.Event()
+
+
+def _alert_scheduler() -> None:
+    while not _scheduler_stop.is_set():
+        try:
+            alerts.evaluate()
+        except Exception:  # noqa: BLE001 — never let the loop die on a transient error
+            pass
+        _scheduler_stop.wait(ALERT_EVAL_INTERVAL)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    thread: threading.Thread | None = None
+    if ALERT_EVAL_INTERVAL > 0:
+        thread = threading.Thread(target=_alert_scheduler, daemon=True, name="alert-scheduler")
+        thread.start()
+    try:
+        yield
+    finally:
+        _scheduler_stop.set()
+        if thread is not None:
+            thread.join(timeout=5)
+
+
+app = FastAPI(title="DNS Watch", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

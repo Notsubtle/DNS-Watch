@@ -121,7 +121,9 @@ npm run dev    # http://localhost:5173, proxies /api to :8090
 - **CSV export** — download the current filtered query view.
 - **Pagination** — the query log is paged with an exact total ("201–400 of 5,000").
 - **Alert rules** — watch for query-volume spikes (per-client or overall), new
-  devices, or specific domain keywords. Fired alerts show in the Alerts panel.
+  devices, or specific domain keywords. Rules are evaluated **server-side on a
+  timer** (`ALERT_EVAL_INTERVAL_SECONDS`, default 60), so alerts fire and webhooks
+  send even with no dashboard open. Fired alerts show in the Alerts panel.
   Rules and events are stored in DNS Watch's **own** writable SQLite database
   (`DNSWATCH_DB_PATH`, default `/data/dnswatch.db`, mounted as the `dnswatch-data`
   volume) — Pi-hole's database is still only ever opened read-only.

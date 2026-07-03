@@ -12,6 +12,9 @@ services:
       # Writable store for DNS Watch's own state (alert rules + fired events).
       # Kept entirely separate from Pi-hole's database.
       DNSWATCH_DB_PATH: /data/dnswatch.db
+      # How often (seconds) the server evaluates alert rules on its own, so
+      # alerts + webhooks fire even with no dashboard open. Set 0 to disable.
+      ALERT_EVAL_INTERVAL_SECONDS: 60
     volumes:
       # Read-only mount of Pi-hole's data folder. ':ro' is critical — this
       # process must never be able to write to Pi-hole's database.

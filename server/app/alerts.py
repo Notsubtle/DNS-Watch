@@ -24,6 +24,11 @@ from app import db
 
 STORE_PATH = os.environ.get("DNSWATCH_DB_PATH", "/data/dnswatch.db")
 
+# Serialises rule evaluation so the background scheduler and a concurrent
+# /api/alerts request can't both pass the dedup/cooldown check and double-insert
+# the same event.
+_eval_lock = threading.Lock()
+
 VALID_TYPES = {"volume_threshold", "new_device", "domain_keyword"}
 
 # Webhook payload shapes. "generic" is DNS Watch's own JSON; "slack"/"discord"
@@ -334,7 +339,12 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
 
 
 def evaluate() -> list[dict]:
-    """Evaluate all enabled rules; persist and return newly-fired events."""
+    """Evaluate all enabled rules; persist and return newly-fired events.
+
+    Safe to call from both the background scheduler and request handlers — the
+    module-level lock serialises the dedup-check-then-insert so the same event
+    can't be written twice by concurrent callers.
+    """
     init_store()
     now = int(time.time())
     rules = [r for r in list_rules() if r["enabled"]]
@@ -346,7 +356,7 @@ def evaluate() -> list[dict]:
             continue
 
     fired: list[dict] = []
-    with _connect() as conn:
+    with _eval_lock, _connect() as conn:
         for ev in pending:
             cooldown = DEFAULT_COOLDOWN.get(ev["type"], 900)
             if _recently_fired(conn, ev["dedup_key"], cooldown, now):
