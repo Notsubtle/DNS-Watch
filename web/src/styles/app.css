@@ -764,3 +764,78 @@ tr:hover td {
   font-size: 13px;
   color: var(--ink-muted);
 }
+
+/* Settings modal */
+.header-settings {
+  align-self: center;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.settings-url {
+  background: var(--ink-surf2);
+  border: 1px solid var(--ink-border);
+  color: var(--ink-text);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  width: 100%;
+}
+
+.settings-hint {
+  font-size: 12px;
+  color: var(--ink-muted);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.settings-hint code {
+  font-family: var(--font-mono);
+  background: var(--ink-surf2);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-actions .spacer {
+  flex: 1;
+}
+
+.settings-saved {
+  color: var(--ink-green);
+  font-size: 12px;
+}
+
+.settings-test {
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+
+.settings-test.ok {
+  background: var(--ink-green-bg);
+  color: var(--ink-green);
+}
+
+.settings-test.fail {
+  background: var(--ink-red-bg);
+  color: var(--ink-red);
+}

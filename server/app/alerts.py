@@ -16,7 +16,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
+import urllib.request
 
 from app import db
 
@@ -68,9 +70,100 @@ def init_store() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_events_dedup
                 ON alert_events (dedup_key, created_at);
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             """
         )
         conn.commit()
+
+
+# --------------------------------------------------------------------------
+# Settings (webhook delivery)
+# --------------------------------------------------------------------------
+
+def get_settings() -> dict:
+    init_store()
+    with _connect() as conn:
+        rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
+    d = {r["key"]: r["value"] for r in rows}
+    return {
+        "webhook_enabled": d.get("webhook_enabled", "0") == "1",
+        "webhook_url": d.get("webhook_url", ""),
+    }
+
+
+def update_settings(*, webhook_enabled: bool | None = None, webhook_url: str | None = None) -> dict:
+    init_store()
+    with _connect() as conn:
+        if webhook_enabled is not None:
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES ('webhook_enabled', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("1" if webhook_enabled else "0",),
+            )
+        if webhook_url is not None:
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES ('webhook_url', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (webhook_url.strip(),),
+            )
+        conn.commit()
+    return get_settings()
+
+
+def _build_payload(events: list[dict]) -> dict:
+    """Generic JSON payload. `text` and `content` mirror the summary so common
+    receivers (ntfy, Slack's `text`, Discord's `content`, Home Assistant) work
+    without a translator; structured fields are there for anything smarter."""
+    lines = [f"[{e['severity']}] {e['message']}" for e in events]
+    summary = "\n".join(lines)
+    return {
+        "event": "dns_watch_alert",
+        "count": len(events),
+        "text": summary,
+        "content": summary,
+        "alerts": [
+            {
+                "rule_name": e["rule_name"],
+                "type": e["type"],
+                "severity": e["severity"],
+                "message": e["message"],
+                "created_at": e.get("created_at"),
+            }
+            for e in events
+        ],
+    }
+
+
+def deliver_webhook(url: str, payload: dict, timeout: float = 5.0) -> tuple[bool, str | None]:
+    """POST the payload as JSON. Returns (ok, error). Never raises — delivery
+    problems must not affect alert evaluation or the API response."""
+    if not url:
+        return False, "no webhook URL configured"
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — user-supplied LAN URL
+            return 200 <= resp.status < 300, None if 200 <= resp.status < 300 else f"HTTP {resp.status}"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
+def test_webhook(url: str) -> dict:
+    """Synchronous test send so the settings UI can report success/failure."""
+    payload = {
+        "event": "dns_watch_test",
+        "count": 1,
+        "text": "DNS Watch test alert — your webhook is configured correctly.",
+        "content": "DNS Watch test alert — your webhook is configured correctly.",
+        "alerts": [],
+    }
+    ok, err = deliver_webhook(url, payload)
+    return {"ok": ok, "error": err}
 
 
 # --------------------------------------------------------------------------
@@ -230,6 +323,20 @@ def evaluate() -> list[dict]:
             )
             fired.append({**ev, "created_at": now})
         conn.commit()
+
+    # Push newly-fired alerts out-of-band if a webhook is enabled. Done on a
+    # daemon thread so a slow or unreachable endpoint can't stall the /api/alerts
+    # response (which the dashboard polls every few seconds).
+    if fired:
+        settings = get_settings()
+        if settings["webhook_enabled"] and settings["webhook_url"]:
+            payload = _build_payload(fired)
+            threading.Thread(
+                target=deliver_webhook,
+                args=(settings["webhook_url"], payload),
+                daemon=True,
+            ).start()
+
     return fired
 
 

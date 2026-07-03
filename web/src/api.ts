@@ -92,6 +92,11 @@ export interface AlertsResponse {
   events: AlertEvent[];
 }
 
+export interface AppSettings {
+  webhook_enabled: boolean;
+  webhook_url: string;
+}
+
 export interface Filters {
   client: string; // "" = all
   domain: string;
@@ -172,4 +177,10 @@ export const api = {
   updateRule: (id: number, patch: { name?: string; enabled?: boolean; params?: Record<string, unknown> }) =>
     sendJson<AlertRule>(`/api/alert-rules/${id}`, "PATCH", patch),
   deleteRule: (id: number) => sendJson<{ deleted: number }>(`/api/alert-rules/${id}`, "DELETE"),
+
+  getSettings: () => getJson<AppSettings>("/api/settings"),
+  updateSettings: (patch: Partial<AppSettings>) =>
+    sendJson<AppSettings>("/api/settings", "PATCH", patch),
+  testWebhook: (url: string) =>
+    sendJson<{ ok: boolean; error: string | null }>("/api/settings/test-webhook", "POST", { url }),
 };

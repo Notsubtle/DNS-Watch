@@ -21,6 +21,7 @@ import QueryTypeBreakdown from "./components/QueryTypeBreakdown";
 import DrilldownModal from "./components/DrilldownModal";
 import AlertsPanel from "./components/AlertsPanel";
 import RulesModal from "./components/RulesModal";
+import SettingsModal from "./components/SettingsModal";
 
 const REFRESH_MS = 5000;
 const PAGE_SIZE = 200;
@@ -46,6 +47,7 @@ export default function App() {
   const [alertEvents, setAlertEvents] = useState<AlertEvent[]>([]);
   const [drilldown, setDrilldown] = useState<string | null>(null);
   const [rulesOpen, setRulesOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Any filter change resets paging back to the first page — the old offset
@@ -138,6 +140,9 @@ export default function App() {
           </h1>
           <div className="subtitle">Live per-client DNS activity from Pi-hole</div>
         </div>
+        <button className="btn-small header-settings" onClick={() => setSettingsOpen(true)}>
+          ⚙ Settings
+        </button>
       </div>
 
       {error && <div className="error-banner">{error}</div>}
@@ -185,6 +190,8 @@ export default function App() {
       {rulesOpen && (
         <RulesModal onClose={() => setRulesOpen(false)} onChange={reloadAlerts} />
       )}
+
+      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }

@@ -165,6 +165,32 @@ class RuleUpdate(BaseModel):
     params: dict | None = None
 
 
+class SettingsUpdate(BaseModel):
+    webhook_enabled: bool | None = None
+    webhook_url: str | None = None
+
+
+class WebhookTest(BaseModel):
+    url: str
+
+
+@app.get("/api/settings")
+def api_get_settings():
+    return alerts.get_settings()
+
+
+@app.patch("/api/settings")
+def api_update_settings(patch: SettingsUpdate):
+    return alerts.update_settings(
+        webhook_enabled=patch.webhook_enabled, webhook_url=patch.webhook_url
+    )
+
+
+@app.post("/api/settings/test-webhook")
+def api_test_webhook(body: WebhookTest):
+    return alerts.test_webhook(body.url)
+
+
 @app.get("/api/alerts")
 def api_alerts(limit: int = Query(50, ge=1, le=200)):
     """Evaluate enabled rules against current data, then return recent events."""

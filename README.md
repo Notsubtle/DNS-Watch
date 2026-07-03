@@ -91,6 +91,11 @@ npm run dev    # http://localhost:5173, proxies /api to :8090
   Rules and events are stored in DNS Watch's **own** writable SQLite database
   (`DNSWATCH_DB_PATH`, default `/data/dnswatch.db`, mounted as the `dnswatch-data`
   volume) — Pi-hole's database is still only ever opened read-only.
+- **Webhook delivery (optional)** — toggle it on in **⚙ Settings** and paste a URL
+  to have fired alerts POSTed out as JSON (with a "Send test" button to verify).
+  The summary rides in the `text`/`content` fields so ntfy, Slack, Discord, and
+  Home Assistant all accept it as-is; delivery runs off-thread so a slow or
+  unreachable endpoint never affects the dashboard.
 - **Client naming** — pulls names Pi-hole already knows (from DHCP lease / your
   manual naming in Pi-hole's own UI); no separate naming step needed.
 
