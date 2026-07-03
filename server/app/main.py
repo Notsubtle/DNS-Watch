@@ -168,10 +168,14 @@ class RuleUpdate(BaseModel):
 class SettingsUpdate(BaseModel):
     webhook_enabled: bool | None = None
     webhook_url: str | None = None
+    webhook_secret: str | None = None
+    webhook_format: str | None = None
 
 
 class WebhookTest(BaseModel):
     url: str
+    secret: str = ""
+    format: str = "generic"
 
 
 @app.get("/api/settings")
@@ -181,14 +185,20 @@ def api_get_settings():
 
 @app.patch("/api/settings")
 def api_update_settings(patch: SettingsUpdate):
-    return alerts.update_settings(
-        webhook_enabled=patch.webhook_enabled, webhook_url=patch.webhook_url
-    )
+    try:
+        return alerts.update_settings(
+            webhook_enabled=patch.webhook_enabled,
+            webhook_url=patch.webhook_url,
+            webhook_secret=patch.webhook_secret,
+            webhook_format=patch.webhook_format,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/api/settings/test-webhook")
 def api_test_webhook(body: WebhookTest):
-    return alerts.test_webhook(body.url)
+    return alerts.test_webhook(body.url, body.secret, body.format)
 
 
 @app.get("/api/alerts")

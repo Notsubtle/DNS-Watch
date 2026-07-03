@@ -92,9 +92,13 @@ export interface AlertsResponse {
   events: AlertEvent[];
 }
 
+export type WebhookFormat = "generic" | "slack" | "discord";
+
 export interface AppSettings {
   webhook_enabled: boolean;
   webhook_url: string;
+  webhook_secret: string;
+  webhook_format: WebhookFormat;
 }
 
 export interface Filters {
@@ -181,6 +185,10 @@ export const api = {
   getSettings: () => getJson<AppSettings>("/api/settings"),
   updateSettings: (patch: Partial<AppSettings>) =>
     sendJson<AppSettings>("/api/settings", "PATCH", patch),
-  testWebhook: (url: string) =>
-    sendJson<{ ok: boolean; error: string | null }>("/api/settings/test-webhook", "POST", { url }),
+  testWebhook: (url: string, secret: string, format: WebhookFormat) =>
+    sendJson<{ ok: boolean; error: string | null }>("/api/settings/test-webhook", "POST", {
+      url,
+      secret,
+      format,
+    }),
 };

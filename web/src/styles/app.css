@@ -784,6 +784,26 @@ tr:hover td {
   cursor: pointer;
 }
 
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.settings-label {
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.settings-field select {
+  background: var(--ink-surf2);
+  border: 1px solid var(--ink-border);
+  color: var(--ink-text);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
 .settings-url {
   background: var(--ink-surf2);
   border: 1px solid var(--ink-border);
@@ -793,6 +813,7 @@ tr:hover td {
   font-size: 13px;
   font-family: var(--font-mono);
   width: 100%;
+  box-sizing: border-box;
 }
 
 .settings-hint {

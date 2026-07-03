@@ -92,10 +92,13 @@ npm run dev    # http://localhost:5173, proxies /api to :8090
   (`DNSWATCH_DB_PATH`, default `/data/dnswatch.db`, mounted as the `dnswatch-data`
   volume) — Pi-hole's database is still only ever opened read-only.
 - **Webhook delivery (optional)** — toggle it on in **⚙ Settings** and paste a URL
-  to have fired alerts POSTed out as JSON (with a "Send test" button to verify).
-  The summary rides in the `text`/`content` fields so ntfy, Slack, Discord, and
-  Home Assistant all accept it as-is; delivery runs off-thread so a slow or
-  unreachable endpoint never affects the dashboard.
+  to have fired alerts POSTed out (with a "Send test" button to verify). Pick a
+  **format** — *Generic JSON* (ntfy / Home Assistant / custom, summary in
+  `text`/`content` plus structured `alerts`), *Slack* (top-level `text`), or
+  *Discord* (`content`, capped at Discord's limit). An optional **auth token** is
+  sent as an `Authorization: Bearer` header (e.g. an ntfy access token) — for
+  Slack/Discord the secret is already in the URL, so leave it blank. Delivery runs
+  off-thread, so a slow or unreachable endpoint never affects the dashboard.
 - **Client naming** — pulls names Pi-hole already knows (from DHCP lease / your
   manual naming in Pi-hole's own UI); no separate naming step needed.
 

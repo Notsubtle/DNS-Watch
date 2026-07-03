@@ -1,13 +1,21 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, WebhookFormat } from "../api";
 
 interface Props {
   onClose: () => void;
 }
 
+const FORMATS: { value: WebhookFormat; label: string }[] = [
+  { value: "generic", label: "Generic JSON (ntfy, Home Assistant, custom)" },
+  { value: "slack", label: "Slack" },
+  { value: "discord", label: "Discord" },
+];
+
 export default function SettingsModal({ onClose }: Props) {
   const [enabled, setEnabled] = useState(false);
   const [url, setUrl] = useState("");
+  const [secret, setSecret] = useState("");
+  const [format, setFormat] = useState<WebhookFormat>("generic");
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -21,6 +29,8 @@ export default function SettingsModal({ onClose }: Props) {
       .then((s) => {
         setEnabled(s.webhook_enabled);
         setUrl(s.webhook_url);
+        setSecret(s.webhook_secret);
+        setFormat(s.webhook_format);
       })
       .catch((e) => setError((e as Error).message))
       .finally(() => setLoaded(true));
@@ -35,12 +45,17 @@ export default function SettingsModal({ onClose }: Props) {
   // Clear the "Saved" pill whenever the user edits again.
   useEffect(() => {
     setSaved(false);
-  }, [enabled, url]);
+  }, [enabled, url, secret, format]);
 
   async function save() {
     setSaving(true);
     try {
-      await api.updateSettings({ webhook_enabled: enabled, webhook_url: url.trim() });
+      await api.updateSettings({
+        webhook_enabled: enabled,
+        webhook_url: url.trim(),
+        webhook_secret: secret.trim(),
+        webhook_format: format,
+      });
       setSaved(true);
       setError(null);
     } catch (e) {
@@ -54,13 +69,18 @@ export default function SettingsModal({ onClose }: Props) {
     setTesting(true);
     setTestResult(null);
     try {
-      setTestResult(await api.testWebhook(url.trim()));
+      setTestResult(await api.testWebhook(url.trim(), secret.trim(), format));
     } catch (e) {
       setTestResult({ ok: false, error: (e as Error).message });
     } finally {
       setTesting(false);
     }
   }
+
+  const secretHint =
+    format === "slack" || format === "discord"
+      ? "Slack/Discord put the secret in the webhook URL itself — leave this blank."
+      : "Optional. Sent as an Authorization: Bearer header (e.g. an ntfy access token).";
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -89,18 +109,45 @@ export default function SettingsModal({ onClose }: Props) {
               <span>Send fired alerts to a webhook</span>
             </label>
 
-            <input
-              type="text"
-              className="settings-url"
-              placeholder="https://ntfy.sh/my-topic  or  http://homeassistant.local:8123/api/webhook/…"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-            />
+            <label className="settings-field">
+              <span className="settings-label">Format</span>
+              <select value={format} onChange={(e) => setFormat(e.target.value as WebhookFormat)}>
+                {FORMATS.map((f) => (
+                  <option key={f.value} value={f.value}>
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="settings-field">
+              <span className="settings-label">Webhook URL</span>
+              <input
+                type="text"
+                className="settings-url"
+                placeholder="https://ntfy.sh/my-topic  or  https://discord.com/api/webhooks/…"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+              />
+            </label>
+
+            <label className="settings-field">
+              <span className="settings-label">Auth token / secret</span>
+              <input
+                type="password"
+                className="settings-url"
+                placeholder="optional"
+                value={secret}
+                onChange={(e) => setSecret(e.target.value)}
+                autoComplete="new-password"
+              />
+              <span className="settings-hint">{secretHint}</span>
+            </label>
 
             <p className="settings-hint">
-              DNS Watch sends a JSON <code>POST</code> for each batch of new alerts. The summary is
-              in the <code>text</code> and <code>content</code> fields (so ntfy, Slack, Discord and
-              Home Assistant all work), with structured details under <code>alerts</code>.
+              {format === "generic"
+                ? "Generic sends DNS Watch's own JSON — the summary is in text/content, with structured details under alerts."
+                : `${format[0].toUpperCase()}${format.slice(1)} format posts exactly the field that service expects.`}
             </p>
 
             <div className="settings-actions">

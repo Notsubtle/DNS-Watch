@@ -26,6 +26,12 @@ STORE_PATH = os.environ.get("DNSWATCH_DB_PATH", "/data/dnswatch.db")
 
 VALID_TYPES = {"volume_threshold", "new_device", "domain_keyword"}
 
+# Webhook payload shapes. "generic" is DNS Watch's own JSON; "slack"/"discord"
+# emit exactly the single field each of those incoming-webhook APIs requires.
+VALID_FORMATS = {"generic", "slack", "discord"}
+DISCORD_MAX = 1900  # Discord hard-limits `content` at 2000; leave headroom.
+SLACK_MAX = 3000
+
 # Default re-fire cooldown per rule type, in seconds, when the rule doesn't
 # specify its own. New-device alerts get a long cooldown so a device isn't
 # re-announced all day; volume/keyword track their own window.
@@ -88,37 +94,60 @@ def get_settings() -> dict:
     with _connect() as conn:
         rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
     d = {r["key"]: r["value"] for r in rows}
+    fmt = d.get("webhook_format", "generic")
     return {
         "webhook_enabled": d.get("webhook_enabled", "0") == "1",
         "webhook_url": d.get("webhook_url", ""),
+        "webhook_secret": d.get("webhook_secret", ""),
+        "webhook_format": fmt if fmt in VALID_FORMATS else "generic",
     }
 
 
-def update_settings(*, webhook_enabled: bool | None = None, webhook_url: str | None = None) -> dict:
+def _put(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+
+
+def update_settings(
+    *,
+    webhook_enabled: bool | None = None,
+    webhook_url: str | None = None,
+    webhook_secret: str | None = None,
+    webhook_format: str | None = None,
+) -> dict:
+    if webhook_format is not None and webhook_format not in VALID_FORMATS:
+        raise ValueError(f"unknown webhook format: {webhook_format}")
     init_store()
     with _connect() as conn:
         if webhook_enabled is not None:
-            conn.execute(
-                "INSERT INTO app_settings (key, value) VALUES ('webhook_enabled', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                ("1" if webhook_enabled else "0",),
-            )
+            _put(conn, "webhook_enabled", "1" if webhook_enabled else "0")
         if webhook_url is not None:
-            conn.execute(
-                "INSERT INTO app_settings (key, value) VALUES ('webhook_url', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (webhook_url.strip(),),
-            )
+            _put(conn, "webhook_url", webhook_url.strip())
+        if webhook_secret is not None:
+            _put(conn, "webhook_secret", webhook_secret.strip())
+        if webhook_format is not None:
+            _put(conn, "webhook_format", webhook_format)
         conn.commit()
     return get_settings()
 
 
-def _build_payload(events: list[dict]) -> dict:
-    """Generic JSON payload. `text` and `content` mirror the summary so common
-    receivers (ntfy, Slack's `text`, Discord's `content`, Home Assistant) work
-    without a translator; structured fields are there for anything smarter."""
-    lines = [f"[{e['severity']}] {e['message']}" for e in events]
-    summary = "\n".join(lines)
+def _summary(events: list[dict]) -> str:
+    return "\n".join(f"[{e['severity']}] {e['message']}" for e in events)
+
+
+def _wrap_payload(fmt: str, summary: str, events: list[dict]) -> dict:
+    """Shape a summary string into the body the chosen receiver expects."""
+    if fmt == "slack":
+        # Slack incoming webhooks require a top-level `text`.
+        return {"text": summary[:SLACK_MAX] or "DNS Watch alert"}
+    if fmt == "discord":
+        # Discord incoming webhooks require a non-empty `content` (≤ 2000 chars).
+        return {"content": summary[:DISCORD_MAX] or "DNS Watch alert"}
+    # Generic DNS Watch JSON. `text`/`content` still mirror the summary so a
+    # generic receiver (ntfy, Home Assistant) gets a human string for free.
     return {
         "event": "dns_watch_alert",
         "count": len(events),
@@ -137,32 +166,39 @@ def _build_payload(events: list[dict]) -> dict:
     }
 
 
-def deliver_webhook(url: str, payload: dict, timeout: float = 5.0) -> tuple[bool, str | None]:
+def deliver_webhook(
+    url: str, payload: dict, secret: str = "", timeout: float = 5.0
+) -> tuple[bool, str | None]:
     """POST the payload as JSON. Returns (ok, error). Never raises — delivery
-    problems must not affect alert evaluation or the API response."""
+    problems must not affect alert evaluation or the API response.
+
+    A non-empty `secret` is sent as `Authorization: Bearer <secret>`, which
+    covers ntfy access tokens and any receiver that checks a bearer credential.
+    """
     if not url:
         return False, "no webhook URL configured"
     try:
         data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=data, headers={"Content-Type": "application/json"}, method="POST"
-        )
+        headers = {"Content-Type": "application/json"}
+        if secret:
+            headers["Authorization"] = f"Bearer {secret}"
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — user-supplied LAN URL
-            return 200 <= resp.status < 300, None if 200 <= resp.status < 300 else f"HTTP {resp.status}"
+            ok = 200 <= resp.status < 300
+            return ok, None if ok else f"HTTP {resp.status}"
     except Exception as e:  # noqa: BLE001
         return False, str(e)
 
 
-def test_webhook(url: str) -> dict:
+def test_webhook(url: str, secret: str = "", fmt: str = "generic") -> dict:
     """Synchronous test send so the settings UI can report success/failure."""
-    payload = {
-        "event": "dns_watch_test",
-        "count": 1,
-        "text": "DNS Watch test alert — your webhook is configured correctly.",
-        "content": "DNS Watch test alert — your webhook is configured correctly.",
-        "alerts": [],
-    }
-    ok, err = deliver_webhook(url, payload)
+    if fmt not in VALID_FORMATS:
+        fmt = "generic"
+    summary = "DNS Watch test alert — your webhook is configured correctly."
+    payload = _wrap_payload(fmt, summary, [])
+    if fmt == "generic":
+        payload["event"] = "dns_watch_test"
+    ok, err = deliver_webhook(url, payload, secret)
     return {"ok": ok, "error": err}
 
 
@@ -330,10 +366,10 @@ def evaluate() -> list[dict]:
     if fired:
         settings = get_settings()
         if settings["webhook_enabled"] and settings["webhook_url"]:
-            payload = _build_payload(fired)
+            payload = _wrap_payload(settings["webhook_format"], _summary(fired), fired)
             threading.Thread(
                 target=deliver_webhook,
-                args=(settings["webhook_url"], payload),
+                args=(settings["webhook_url"], payload, settings["webhook_secret"]),
                 daemon=True,
             ).start()
 
