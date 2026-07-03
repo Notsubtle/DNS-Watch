@@ -5,3 +5,6 @@ server/**/__pycache__/
 .env
 
 tsconfig.tsbuildinfo
+
+# Local Claude Code settings (machine-specific)
+.claude/settings.local.json
