@@ -31,8 +31,14 @@ services:
     volumes:
       # Live-mounted source → uvicorn --reload picks up edits.
       - ../server/app:/srv/app
-      # Read-only snapshot of the real Pi-hole FTL DB.
-      - ./pihole-data/pihole-FTL.db:/pihole-data/pihole-FTL.db:ro
+      # Read-only snapshot of the real Pi-hole FTL DB. Mounted as a DIRECTORY,
+      # not the single file — snapshot-pihole-db.sh replaces the file (VACUUM
+      # INTO writes a new inode) rather than editing it in place. A file-level
+      # bind mount pins to the original inode and silently keeps serving stale
+      # data after a re-snapshot; a directory bind mount follows the current
+      # file. Confirmed the hard way: re-running the snapshot script alone did
+      # NOT update what the running container saw until it was restarted.
+      - ./pihole-data:/pihole-data:ro
       # Throwaway writable store for alert rules/events (never prod's).
       - dnswatch-uat-data:/data
     restart: unless-stopped
@@ -72,7 +78,8 @@ services:
       DNSWATCH_DB_PATH: /data/dnswatch.db
       ALERT_EVAL_INTERVAL_SECONDS: 60
     volumes:
-      - ./pihole-data/pihole-FTL.db:/pihole-data/pihole-FTL.db:ro
+      # Directory mount — see the `api` service's volumes comment above for why.
+      - ./pihole-data:/pihole-data:ro
       - dnswatch-uat-data:/data
     restart: unless-stopped
 

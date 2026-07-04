@@ -35,6 +35,260 @@ body {
   font-size: 13px;
 }
 
+.tab-nav {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--ink-border);
+}
+
+.tab-nav-btn {
+  border: none;
+  background: none;
+  color: var(--ink-muted);
+  font-size: 13px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  padding: 8px 4px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+}
+
+.tab-nav-btn:hover {
+  color: var(--ink-text);
+}
+
+.tab-nav-btn.active {
+  color: var(--ink-blue);
+  border-bottom-color: var(--ink-blue);
+}
+
+.tab-placeholder {
+  color: var(--ink-faint);
+  font-size: 13px;
+  padding: 40px 0;
+  text-align: center;
+}
+
+/* Live Stream console */
+.stream-console {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 200px);
+  min-height: 420px;
+}
+
+.stream-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.stream-count {
+  color: var(--ink-faint);
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.stream-list-wrap {
+  flex: 1;
+  background: #05070a;
+  border: 1px solid var(--ink-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.stream-row {
+  display: grid;
+  grid-template-columns: 90px 160px 1fr 90px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-text);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  box-sizing: border-box;
+}
+
+.stream-time {
+  color: var(--ink-faint);
+}
+
+.stream-client {
+  color: var(--ink-blue);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stream-domain {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes stream-row-flash {
+  from {
+    background: rgba(77, 158, 255, 0.25);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+.stream-row-new {
+  animation: stream-row-flash 700ms ease-out;
+}
+
+/* Throttling is a warning, not a failure — amber, not the red error-banner. */
+.throttle-banner {
+  background: var(--ink-amber-bg);
+  color: var(--ink-amber);
+  border-color: var(--ink-amber);
+}
+
+.highlight-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.stream-head-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Blocklist simulator */
+.simulator-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.simulator-form {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.simulator-pattern {
+  flex: 1;
+  background: var(--ink-surf2);
+  border: 1px solid var(--ink-border);
+  border-radius: 6px;
+  color: var(--ink-text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+.simulator-summary p {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.simulator-summary p:last-child {
+  margin-bottom: 0;
+}
+
+.simulator-high-impact {
+  color: var(--ink-amber);
+}
+
+.simulator-client-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.simulator-client-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--ink-border);
+  font-size: 13px;
+}
+
+.simulator-client-list li:last-child {
+  border-bottom: none;
+}
+
+.simulator-client-list li.high-impact .count {
+  color: var(--ink-amber);
+}
+
+.simulator-client-list .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-right: 8px;
+}
+
+.simulator-client-list .count {
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* Client heatmap */
+.heatmap-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.heatmap-tab .panel select {
+  margin-top: 8px;
+}
+
+.heatmap-grid {
+  display: grid;
+  gap: 2px;
+  grid-auto-rows: 22px;
+  overflow-x: auto;
+}
+
+.heatmap-corner {
+  /* Empty top-left cell above the row labels. */
+}
+
+.heatmap-hour-label,
+.heatmap-row-label {
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+}
+
+.heatmap-hour-label {
+  justify-content: center;
+}
+
+.heatmap-row-label {
+  justify-content: flex-end;
+  padding-right: 6px;
+}
+
+.heatmap-cell {
+  border-radius: 3px;
+  background: var(--ink-surf2);
+  cursor: pointer;
+}
+
+.heatmap-cell:hover {
+  outline: 1px solid var(--ink-blue);
+}
+
 .live-dot {
   display: inline-block;
   width: 8px;
@@ -645,6 +899,9 @@ tr:hover td {
 .alert-dot.warning { background: var(--ink-amber); }
 .alert-dot.critical { background: var(--ink-red); }
 .alert-dot.info { background: var(--ink-blue); }
+
+.anomaly-item { cursor: pointer; }
+.anomaly-item:hover { filter: brightness(1.3); }
 
 .alert-msg {
   overflow: hidden;

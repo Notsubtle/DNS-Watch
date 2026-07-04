@@ -35,9 +35,17 @@ go looking:
   when it hits domains you care about.
 - **Security hobbyists** — get flagged when a **new/unknown device** joins, when a
   device's query volume **spikes** (possible malware or DNS exfiltration), or when a
-  normally-active device **goes quiet** (offline or tampered with).
+  normally-active device **goes quiet** (offline or tampered with). Spikes and silences
+  are also surfaced **automatically** in a **Network Anomalies** panel, measured against
+  each device's *own* 7-day baseline — no rule setup required.
 - **Tinkerers** — a filterable, per-client live log for debugging a chatty device or
   a false-positive block.
+- **Investigators** — when something looks off, dedicated tools to dig in: a live
+  **"tail -f" stream** to watch queries scroll by in real time (with your own colour
+  highlight rules), a **blocklist simulator** to measure what a Pi-hole-style regex
+  *would* have blocked over the last 7 days before you commit it, and a per-client
+  **activity heatmap** that exposes background chatter during the hours a device is
+  supposed to be idle.
 
 The feature that makes it more than a prettier Pi-hole dashboard is **headless
 alerting**: rules are evaluated server-side on a timer and pushed out via webhook,
@@ -152,6 +160,11 @@ npm run dev    # http://localhost:5173, proxies /api to :8090
 
 ## What you get
 
+The app is organised into tabs: a **Dashboard** (everything below down to
+"Optional login"), plus three focused analysis views — **Live Stream**,
+**Blocklist Simulator**, and **Client Heatmaps** — described under
+"Analysis tabs" further down.
+
 - **Live query table** — every DNS query, auto-refreshing, with client, domain,
   status (allowed/blocked), and timestamp.
 - **Filters** — by client (dropdown of known devices), domain (substring search),
@@ -193,8 +206,39 @@ npm run dev    # http://localhost:5173, proxies /api to :8090
   being abused to probe the host's own network.
 - **Client naming** — pulls names Pi-hole already knows (from DHCP lease / your
   manual naming in Pi-hole's own UI); no separate naming step needed.
+- **Automatic anomaly detection** — a **Network Anomalies** panel flags clients that
+  have gone unexpectedly **silent** or are **spiking**, judged against each client's
+  *own* rolling 7-day hourly baseline (fixed thresholds, always on — distinct from the
+  configurable Alert rules above, and needing no setup). Click one to jump the
+  dashboard to the window it fired in.
 - **Optional login** — set `DNSWATCH_AUTH_PASSWORD` (see `.env.example`) to gate the
   whole app behind HTTP Basic auth. Left unset, it's open on your LAN as before.
+
+## Analysis tabs
+
+Beyond the dashboard, three purpose-built views for digging into a specific question:
+
+- **Live Stream ("tail -f")** — a real-time console where new queries stream in as
+  they land (short-interval polling), for watching exactly what a device does the
+  moment you interact with it. Define your own **highlight rules** (glob patterns like
+  `*netflix*` → a colour) to make the traffic you care about pop, and the console
+  throttles itself gracefully under a flood so a chatty device can't lock up the tab.
+  (How "live" it can be is ultimately bounded by Pi-hole FTL's own on-disk flush
+  interval, `database.DBinterval`, default 60s — an inherent property of reading its
+  database, not this app's poll rate.)
+- **Blocklist Impact Simulator** — paste a **Pi-hole-style regex** and see how much of
+  the **last 7 days** of real traffic it *would* have blocked — total matches, unique
+  domains, a top-domains breakdown, and a per-client impact percentage ("this rule
+  would account for 45% of the SmartFridge's traffic") — **before** you commit the
+  rule to Pi-hole. Runs entirely read-only against a hard-capped 7-day window; it never
+  writes a rule anywhere.
+- **Client Heatmaps ("sleep mode")** — pick a device and see a **7-day × 24-hour**
+  grid of its activity in *your* local time, coloured by that client's own busiest
+  hour, to expose background chatter during hours it should be idle. Click any cell to
+  drill into the exact queries behind it (the spec's "what fired at 4 a.m. Wednesday?"
+  workflow). Timezone conversion is done explicitly in the backend from the browser's
+  own IANA zone, so "the middle of the night" is correct regardless of the container's
+  clock configuration.
 
 ## Notes / limitations
 

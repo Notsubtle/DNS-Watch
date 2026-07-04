@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AlertEvent,
+  Anomaly,
   api,
   ClientActivity,
   ClientInfo,
@@ -21,13 +22,40 @@ import QueryTypeBreakdown from "./components/QueryTypeBreakdown";
 import DrilldownModal from "./components/DrilldownModal";
 import ClientDetailModal from "./components/ClientDetailModal";
 import AlertsPanel from "./components/AlertsPanel";
+import AnomaliesPanel from "./components/AnomaliesPanel";
 import RulesModal from "./components/RulesModal";
 import SettingsModal from "./components/SettingsModal";
+import TabNav, { View } from "./components/TabNav";
+import LiveStreamTab from "./components/LiveStreamTab";
+import SimulatorTab from "./components/SimulatorTab";
+import ClientHeatmapTab from "./components/ClientHeatmapTab";
+
+// The smallest preset range (FilterBar only offers fixed buckets, no
+// arbitrary since/until) that fully contains an anomaly's detection window —
+// close enough to "jump to when it happened" without introducing exact
+// since/until support into the app's filter model just for this feature.
+function nearestPresetForAnomaly(a: Anomaly): string {
+  const spanSeconds = a.window_until - a.window_since;
+  if (spanSeconds <= 15 * 60) return "15m";
+  if (spanSeconds <= 60 * 60) return "1h";
+  if (spanSeconds <= 24 * 60 * 60) return "24h";
+  return "7d";
+}
 
 const REFRESH_MS = 5000;
+// Anomaly detection operates on hourly buckets, so nothing meaningful changes
+// between one 5s dashboard tick and the next — polling it that often is pure
+// waste. It also measured ~1.5s per call against the real ~650k-row Cube1
+// snapshot (no index on Pi-hole's `client` column to speed it up further, and
+// this app must never modify Pi-hole's schema). A slower, independent
+// interval matches the alert engine's own 60s default eval cadence
+// (ALERT_EVAL_INTERVAL_SECONDS) and keeps this off the fast refresh's
+// critical path.
+const ANOMALIES_REFRESH_MS = 60000;
 const PAGE_SIZE = 200;
 
 export default function App() {
+  const [view, setView] = useState<View>("dashboard");
   const [filters, setFiltersState] = useState<Filters>({
     client: "",
     domain: "",
@@ -46,6 +74,7 @@ export default function App() {
   const [series, setSeries] = useState<Timeseries | null>(null);
   const [queryTypes, setQueryTypes] = useState<QueryTypeEntry[]>([]);
   const [alertEvents, setAlertEvents] = useState<AlertEvent[]>([]);
+  const [anomalies, setAnomalies] = useState<Anomaly[]>([]);
   const [drilldown, setDrilldown] = useState<string | null>(null);
   const [clientDetail, setClientDetail] = useState<string | null>(null);
   const [rulesOpen, setRulesOpen] = useState(false);
@@ -112,6 +141,13 @@ export default function App() {
     }
   }
 
+  // Clicking an anomaly filters the main view to that client, scoped to
+  // (approximately) when it happened. Reuses the existing filter state
+  // machinery — same as ClientList's/TopList's click-through.
+  function handleAnomalySelect(a: Anomaly) {
+    setFilters({ ...filters, client: a.ip, range: nearestPresetForAnomaly(a) });
+  }
+
   // Re-evaluate alerts on demand (after a rule is added/toggled/removed).
   async function reloadAlerts() {
     try {
@@ -123,14 +159,34 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (view !== "dashboard") return;
     refresh(true);
-  }, [filters.client, filters.status, filters.range, debouncedDomain, offset]);
+  }, [view, filters.client, filters.status, filters.range, debouncedDomain, offset]);
 
   useEffect(() => {
-    if (!autoRefresh) return;
+    if (!autoRefresh || view !== "dashboard") return;
     const id = setInterval(() => refresh(false), REFRESH_MS);
     return () => clearInterval(id);
-  }, [autoRefresh, filters.client, filters.status, filters.range, debouncedDomain, offset]);
+  }, [autoRefresh, view, filters.client, filters.status, filters.range, debouncedDomain, offset]);
+
+  // Independent, slower poll for anomalies — see ANOMALIES_REFRESH_MS above
+  // for why this isn't part of the main 5s refresh. Also only runs on the
+  // dashboard tab — no point polling a widget that isn't on screen, and it
+  // keeps the Live Stream tab's own high-frequency polling as the only thing
+  // hitting the backend while that tab is active.
+  useEffect(() => {
+    if (view !== "dashboard") return;
+    let cancelled = false;
+    function poll() {
+      api.anomalies().then((an) => !cancelled && setAnomalies(an)).catch(() => {});
+    }
+    poll();
+    const id = setInterval(poll, ANOMALIES_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [view]);
 
   return (
     <div className="app">
@@ -147,59 +203,71 @@ export default function App() {
         </button>
       </div>
 
-      {error && <div className="error-banner">{error}</div>}
+      <TabNav view={view} onChange={setView} />
 
-      <FilterBar
-        filters={filters}
-        onChange={setFilters}
-        clients={clients}
-        autoRefresh={autoRefresh}
-        onToggleAutoRefresh={() => setAutoRefresh((v) => !v)}
-        csvHref={api.csvUrl(effectiveFilters)}
-      />
+      {view === "dashboard" && (
+        <>
+          {error && <div className="error-banner">{error}</div>}
 
-      <SummaryCards summary={summary} />
+          <FilterBar
+            filters={filters}
+            onChange={setFilters}
+            clients={clients}
+            autoRefresh={autoRefresh}
+            onToggleAutoRefresh={() => setAutoRefresh((v) => !v)}
+            csvHref={api.csvUrl(effectiveFilters)}
+          />
 
-      <AlertsPanel events={alertEvents} onManageRules={() => setRulesOpen(true)} />
+          <SummaryCards summary={summary} />
 
-      <TimeSeriesChart data={series} loading={loading} />
+          <AnomaliesPanel anomalies={anomalies} onSelect={handleAnomalySelect} />
 
-      <div className="main-grid">
-        <QueryTable
-          rows={rows}
-          total={total}
-          offset={offset}
-          pageSize={PAGE_SIZE}
-          loading={loading}
-          onPrev={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
-          onNext={() => setOffset((o) => o + PAGE_SIZE)}
-        />
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <TopList title="Top domains" entries={topDomains} onSelect={setDrilldown} />
-          <ClientList clients={topClients} onSelect={setClientDetail} />
-          <QueryTypeBreakdown entries={queryTypes} />
-        </div>
-      </div>
+          <AlertsPanel events={alertEvents} onManageRules={() => setRulesOpen(true)} />
 
-      {drilldown && (
-        <DrilldownModal
-          domain={drilldown}
-          filters={effectiveFilters}
-          onClose={() => setDrilldown(null)}
-        />
+          <TimeSeriesChart data={series} loading={loading} />
+
+          <div className="main-grid">
+            <QueryTable
+              rows={rows}
+              total={total}
+              offset={offset}
+              pageSize={PAGE_SIZE}
+              loading={loading}
+              onPrev={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+              onNext={() => setOffset((o) => o + PAGE_SIZE)}
+            />
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              <TopList title="Top domains" entries={topDomains} onSelect={setDrilldown} />
+              <ClientList clients={topClients} onSelect={setClientDetail} />
+              <QueryTypeBreakdown entries={queryTypes} />
+            </div>
+          </div>
+
+          {drilldown && (
+            <DrilldownModal
+              domain={drilldown}
+              filters={effectiveFilters}
+              onClose={() => setDrilldown(null)}
+            />
+          )}
+
+          {clientDetail && (
+            <ClientDetailModal
+              ip={clientDetail}
+              range={effectiveFilters.range}
+              onClose={() => setClientDetail(null)}
+            />
+          )}
+
+          {rulesOpen && (
+            <RulesModal onClose={() => setRulesOpen(false)} onChange={reloadAlerts} />
+          )}
+        </>
       )}
 
-      {clientDetail && (
-        <ClientDetailModal
-          ip={clientDetail}
-          range={effectiveFilters.range}
-          onClose={() => setClientDetail(null)}
-        />
-      )}
-
-      {rulesOpen && (
-        <RulesModal onClose={() => setRulesOpen(false)} onChange={reloadAlerts} />
-      )}
+      {view === "stream" && <LiveStreamTab />}
+      {view === "simulator" && <SimulatorTab />}
+      {view === "heatmap" && <ClientHeatmapTab clients={clients} />}
 
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
     </div>

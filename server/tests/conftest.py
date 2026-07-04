@@ -102,6 +102,92 @@ def build_ftl(path: str, schema: str, n: int = 500, seed: int = 1) -> None:
     conn.close()
 
 
+def add_client_with_hourly_pattern(
+    path: str, schema: str, ip: str, name: str, counts_per_hour: list[int], now: int | None = None
+) -> None:
+    """Add one client with an EXACT hourly query-count pattern, on top of
+    whatever `build_ftl()` already populated.
+
+    `build_ftl()`'s own clients are only ever useful for "normal recent
+    traffic" tests — their first-ever query is always within the last hour,
+    so anomaly-detection tests (which need a real 24h+ history to even be
+    eligible, per the new-device exclusion) can't use them. This gives
+    anomaly tests deterministic control instead of relying on randomized
+    single-hour data.
+
+    `counts_per_hour[-1]` is the most recent hour (ending at `now`),
+    `counts_per_hour[0]` the oldest — so the caller can build a steady
+    baseline followed by a specific silent/spike/normal recent window.
+    """
+    now = now if now is not None else int(time.time())
+    conn = sqlite3.connect(path)
+    c = conn.cursor()
+
+    if schema == "new":
+        next_id = c.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM client").fetchone()[0]
+        c.execute("INSERT INTO client (id, ip, name) VALUES (?,?,?)", (next_id, ip, name))
+    elif schema == "real":
+        next_id = c.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM network").fetchone()[0]
+        c.execute("INSERT INTO network (id, hwaddr, macVendor) VALUES (?,?,?)",
+                  (next_id, f"aa:bb:cc:dd:ee:{next_id:02x}", "TestVendor"))
+        c.execute(
+            "INSERT INTO network_addresses (network_id, ip, lastSeen, name, nameUpdated) VALUES (?,?,?,?,?)",
+            (next_id, ip, now, name, now))
+    else:  # old
+        next_id = c.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM network").fetchone()[0]
+        c.execute("INSERT INTO network VALUES (?,?)", (next_id, name))
+        c.execute("INSERT INTO network_addresses VALUES (?,?)", (ip, next_id))
+
+    n_hours = len(counts_per_hour)
+    for hour_idx, count in enumerate(counts_per_hour):
+        hour_start = now - (n_hours - hour_idx) * 3600
+        for _ in range(count):
+            ts = hour_start + random.uniform(0, 3599)
+            if schema == "new":
+                c.execute(
+                    "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,?)",
+                    (int(ts), 1, 2, "steady.example.com", next_id),
+                )
+            else:
+                c.execute(
+                    "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                    (ts if schema == "real" else int(ts), 1, 2, "steady.example.com", ip),
+                )
+    conn.commit()
+    conn.close()
+
+
+def insert_queries_at_timestamp(path: str, schema: str, ts: float, n: int) -> list[int]:
+    """Insert `n` rows all sharing the EXACT same timestamp `ts`, for the
+    first client `build_ftl()` already created (CLIENTS[0]). Returns the
+    inserted rows' ids in insertion order.
+
+    `build_ftl()`'s randomized timestamps (spread across an hour) essentially
+    never collide, so a tail-cursor test needs this to genuinely exercise the
+    same-timestamp tie-breaking a real burst of near-simultaneous queries
+    would produce — a spread-out fixture could never catch a bug there.
+    """
+    conn = sqlite3.connect(path)
+    c = conn.cursor()
+    ids = []
+    for i in range(n):
+        domain = f"burst-{i}.example.com"
+        if schema == "new":
+            c.execute(
+                "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,?)",
+                (ts, 1, 2, domain, 1),
+            )
+        else:
+            c.execute(
+                "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                (ts, 1, 2, domain, CLIENTS[0][0]),
+            )
+        ids.append(c.lastrowid)
+    conn.commit()
+    conn.close()
+    return ids
+
+
 def truth(path: str):
     """A plain read-only connection for computing ground truth in assertions."""
     conn = sqlite3.connect(path)

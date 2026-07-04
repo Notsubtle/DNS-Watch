@@ -5,9 +5,11 @@ import csv
 import hmac
 import io
 import os
+import re
 import threading
 import time
 from contextlib import asynccontextmanager
+from zoneinfo import ZoneInfoNotFoundError
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -130,6 +132,38 @@ def api_queries(
     return {"total": total, "limit": limit, "offset": offset, "rows": rows}
 
 
+@app.get("/api/tail")
+def api_tail(since: float, since_id: int = 0, limit: int = Query(500, le=2000)):
+    """Polling-friendly 'everything new since my last row' feed for the Live
+    Stream console. No default for `since` — the frontend must pass the
+    current time on first mount, or a first call would dump the client's
+    entire history into the console instead of just what's new."""
+    return db.tail_queries(since, since_id, limit)
+
+
+class SimulateRequest(BaseModel):
+    pattern: str
+    range: str = "7d"
+
+
+@app.post("/api/simulate-blocklist")
+def api_simulate_blocklist(body: SimulateRequest):
+    """Retrospective "what would this regex have blocked" — read-only, no
+    path anywhere in DNS Watch applies the pattern to Pi-hole. Window is
+    hard-capped at 7 days server-side regardless of what `range` requests —
+    a safety property (see task README), not a UX default the client can
+    widen.
+    """
+    if not body.pattern.strip():
+        raise HTTPException(status_code=400, detail="Pattern cannot be empty")
+    since = _since_from_range(body.range, None) or (int(time.time()) - 7 * 86400)
+    since = max(since, int(time.time()) - 7 * 86400)
+    try:
+        return db.simulate_pattern(body.pattern, since)
+    except re.error:
+        raise HTTPException(status_code=400, detail="Invalid regular expression syntax")
+
+
 @app.get("/api/queries.csv")
 def api_queries_csv(
     client: str | None = None,
@@ -192,6 +226,29 @@ def api_client_detail(ip: str, range: str | None = "24h", since: int | None = No
     return db.client_detail(ip, effective_since, None)
 
 
+@app.get("/api/client/{ip}/heatmap")
+def api_client_heatmap(ip: str, tz: str, days: int = Query(7, ge=1, le=30)):
+    """7x24 (weekday x hour) activity grid for one client, in the caller's
+    own local time — see db.client_heatmap() for the timezone handling."""
+    try:
+        return db.client_heatmap(ip, tz, days)
+    except ZoneInfoNotFoundError:
+        raise HTTPException(status_code=400, detail="Unknown timezone")
+
+
+@app.get("/api/client/{ip}/heatmap/cell")
+def api_client_heatmap_cell(
+    ip: str, tz: str, weekday: int, hour: int, days: int = Query(7, ge=1, le=30)
+):
+    """The exact rows behind one heatmap cell."""
+    try:
+        return db.client_heatmap_cell(ip, tz, weekday, hour, days)
+    except ZoneInfoNotFoundError:
+        raise HTTPException(status_code=400, detail="Unknown timezone")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/api/summary")
 def api_summary(client: str | None = None, range: str | None = "1h", since: int | None = None):
     effective_since = _since_from_range(range, since)
@@ -208,6 +265,13 @@ def api_top_domains(client: str | None = None, range: str | None = "1h", limit: 
 def api_top_clients(range: str | None = "1h", limit: int = 15):
     effective_since = _since_from_range(range, None)
     return db.top_clients(effective_since, limit)
+
+
+@app.get("/api/anomalies")
+def api_anomalies():
+    """Automatic silent/spike detection against each client's own 7-day
+    baseline. Fixed thresholds, no params — see db.detect_anomalies()."""
+    return db.detect_anomalies()
 
 
 @app.get("/api/client-activity")

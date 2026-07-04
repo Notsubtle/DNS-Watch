@@ -15,6 +15,13 @@ export interface QueriesResponse {
   rows: QueryRow[];
 }
 
+// /api/tail returns the same row shape as /api/queries, plus `id` — needed
+// as the second half of the compound (timestamp, id) polling cursor, since
+// real Pi-hole timestamps are floats and can collide across rows.
+export interface TailRow extends QueryRow {
+  id: number;
+}
+
 export interface ClientInfo {
   ip: string;
   name: string;
@@ -65,6 +72,31 @@ export interface Timeseries {
   series: TimeseriesPoint[];
 }
 
+export interface HeatmapResult {
+  tz: string;
+  days: number;
+  // grid[weekday][hour] — weekday follows Python's datetime.weekday(): Monday=0, Sunday=6.
+  grid: number[][];
+  max: number;
+}
+
+export interface SimulationClientImpact {
+  ip: string;
+  name: string;
+  matched_count: number;
+  total_count: number;
+  pct_of_client_traffic: number;
+}
+
+export interface SimulationResult {
+  pattern: string;
+  since: number;
+  total_matches: number;
+  unique_domains: number;
+  top_domains: { domain: string; count: number }[];
+  clients: SimulationClientImpact[];
+}
+
 export type RuleType = "volume_threshold" | "new_device" | "domain_keyword" | "device_quiet";
 
 export interface AlertRule {
@@ -101,6 +133,17 @@ export interface ClientDetail {
   top_domains: TopEntry[];
   query_types: QueryTypeEntry[];
   timeseries: Timeseries;
+}
+
+export interface Anomaly {
+  ip: string;
+  name: string;
+  kind: "silent" | "spike";
+  baseline_avg: number;
+  baseline_stddev: number;
+  current_value: number;
+  window_since: number;
+  window_until: number;
 }
 
 export type WebhookFormat = "generic" | "slack" | "discord";
@@ -197,6 +240,32 @@ export const api = {
   // Returns the download URL for the current filter view (browser handles the download).
   csvUrl: (f: Filters) =>
     `/api/queries.csv${qs({ client: f.client, domain: f.domain, status: f.status, range: f.range })}`,
+
+  anomalies: () => getJson<Anomaly[]>("/api/anomalies"),
+
+  tail: (since: number, sinceId: number, limit = 500) =>
+    getJson<TailRow[]>(`/api/tail${qs({ since, since_id: sinceId, limit })}`),
+
+  simulateBlocklist: (pattern: string) =>
+    sendJson<SimulationResult>("/api/simulate-blocklist", "POST", { pattern, range: "7d" }),
+
+  clientHeatmap: (ip: string, days = 7) =>
+    getJson<HeatmapResult>(
+      `/api/client/${encodeURIComponent(ip)}/heatmap${qs({
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        days,
+      })}`
+    ),
+
+  clientHeatmapCell: (ip: string, weekday: number, hour: number, days = 7) =>
+    getJson<QueryRow[]>(
+      `/api/client/${encodeURIComponent(ip)}/heatmap/cell${qs({
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        weekday,
+        hour,
+        days,
+      })}`
+    ),
 
   alerts: (limit = 50) => getJson<AlertsResponse>(`/api/alerts${qs({ limit })}`),
   listRules: () => getJson<AlertRule[]>("/api/alert-rules"),
