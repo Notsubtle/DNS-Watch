@@ -1,11 +1,14 @@
-"""SSRF hardening for user-supplied webhook URLs (server/app/alerts.py).
+"""Fixes for findings from the security review of server/app/alerts.py.
 
-DNS Watch's webhook feature intentionally targets LAN services (Home Assistant,
-self-hosted ntfy), so private (RFC1918) and loopback addresses must stay
-reachable — only link-local/metadata, multicast, unspecified, and reserved
-ranges, plus non-http(s) schemes, are blocked. These tests pin that boundary
-directly against the validator (no live network calls, so they're fast and
-hermetic) plus one end-to-end check that redirects aren't auto-followed.
+Two things covered here:
+1. SSRF hardening for the user-supplied webhook URL. DNS Watch's webhook feature
+   intentionally targets LAN services (Home Assistant, self-hosted ntfy), so
+   private (RFC1918) and loopback addresses must stay reachable — only
+   link-local/metadata, multicast, unspecified, and reserved ranges, plus
+   non-http(s) schemes, are blocked. Also verifies redirects aren't auto-followed.
+2. The webhook auth secret is never returned in plaintext by GET /api/settings —
+   only whether one is set — since it's a bearer credential for an external
+   service and the API has no auth by default.
 """
 
 from __future__ import annotations
@@ -112,3 +115,61 @@ def test_deliver_webhook_does_not_follow_redirects(redirecting_webhook):
     assert ok is False
     assert "302" in err
     assert followed == []  # the redirect target never received the request
+
+
+# --------------------------------------------------------------------------
+# Webhook secret is never returned in plaintext
+# --------------------------------------------------------------------------
+
+def test_get_settings_never_returns_raw_secret(client):
+    client.patch("/api/settings", json={"webhook_secret": "tok_super_secret"})
+    body = client.get("/api/settings").json()
+    assert "webhook_secret" not in body
+    assert body["webhook_secret_set"] is True
+    assert "tok_super_secret" not in json.dumps(body)
+
+
+def test_get_settings_secret_set_false_when_absent(client):
+    assert client.get("/api/settings").json()["webhook_secret_set"] is False
+
+
+def test_patch_response_also_omits_raw_secret(client):
+    body = client.patch("/api/settings", json={"webhook_secret": "another_tok"}).json()
+    assert "webhook_secret" not in body
+    assert body["webhook_secret_set"] is True
+
+
+def test_omitting_secret_on_patch_preserves_existing_value(client):
+    from app.alerts import _get_raw_settings
+    client.patch("/api/settings", json={"webhook_secret": "keep_me"})
+    # A later PATCH that doesn't mention webhook_secret at all must not touch it.
+    client.patch("/api/settings", json={"webhook_url": "http://192.168.1.5/hook"})
+    assert _get_raw_settings()["webhook_secret"] == "keep_me"
+    assert client.get("/api/settings").json()["webhook_secret_set"] is True
+
+
+def test_empty_string_secret_clears_it(client):
+    from app.alerts import _get_raw_settings
+    client.patch("/api/settings", json={"webhook_secret": "temp"})
+    client.patch("/api/settings", json={"webhook_secret": ""})
+    assert _get_raw_settings()["webhook_secret"] == ""
+    assert client.get("/api/settings").json()["webhook_secret_set"] is False
+
+
+def test_fire_still_delivers_with_secret_after_masking_fix(client, webhook):
+    # End-to-end: the masking fix must not break actual delivery, which needs the
+    # real secret internally even though the API never exposes it.
+    import time
+    url, received = webhook
+    client.patch("/api/settings", json={
+        "webhook_enabled": True, "webhook_url": url, "webhook_secret": "real_tok"})
+    client.post("/api/alert-rules", json={
+        "name": "Vol", "type": "volume_threshold",
+        "params": {"scope": "per_client", "threshold": 50, "window_minutes": 600}})
+    before = len(received)
+    assert client.get("/api/alerts").json()["new"] > 0
+    deadline = time.time() + 5
+    while len(received) <= before and time.time() < deadline:
+        time.sleep(0.03)
+    assert len(received) > before
+    assert received[-1]["auth"] == "Bearer real_tok"

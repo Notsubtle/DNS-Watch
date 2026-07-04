@@ -14,8 +14,14 @@ const FORMATS: { value: WebhookFormat; label: string }[] = [
 export default function SettingsModal({ onClose }: Props) {
   const [enabled, setEnabled] = useState(false);
   const [url, setUrl] = useState("");
-  const [secret, setSecret] = useState("");
   const [format, setFormat] = useState<WebhookFormat>("generic");
+  // The server never hands back the real secret — only whether one is set.
+  // `secretInput` starts empty and is only sent on save/test if the user
+  // actually typed into it (secretTouched), so leaving it alone preserves
+  // whatever's already saved instead of blanking it out.
+  const [secretSet, setSecretSet] = useState(false);
+  const [secretInput, setSecretInput] = useState("");
+  const [secretTouched, setSecretTouched] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -29,8 +35,8 @@ export default function SettingsModal({ onClose }: Props) {
       .then((s) => {
         setEnabled(s.webhook_enabled);
         setUrl(s.webhook_url);
-        setSecret(s.webhook_secret);
         setFormat(s.webhook_format);
+        setSecretSet(s.webhook_secret_set);
       })
       .catch((e) => setError((e as Error).message))
       .finally(() => setLoaded(true));
@@ -45,7 +51,12 @@ export default function SettingsModal({ onClose }: Props) {
   // Clear the "Saved" pill whenever the user edits again.
   useEffect(() => {
     setSaved(false);
-  }, [enabled, url, secret, format]);
+  }, [enabled, url, format, secretInput]);
+
+  function onSecretChange(v: string) {
+    setSecretInput(v);
+    setSecretTouched(true);
+  }
 
   async function save() {
     setSaving(true);
@@ -53,9 +64,14 @@ export default function SettingsModal({ onClose }: Props) {
       await api.updateSettings({
         webhook_enabled: enabled,
         webhook_url: url.trim(),
-        webhook_secret: secret.trim(),
         webhook_format: format,
+        // Omit entirely unless the user touched the field, so an untouched
+        // field never overwrites (or blanks) whatever secret is already saved.
+        ...(secretTouched ? { webhook_secret: secretInput.trim() } : {}),
       });
+      setSecretSet(secretTouched ? secretInput.trim().length > 0 : secretSet);
+      setSecretTouched(false);
+      setSecretInput("");
       setSaved(true);
       setError(null);
     } catch (e) {
@@ -69,7 +85,10 @@ export default function SettingsModal({ onClose }: Props) {
     setTesting(true);
     setTestResult(null);
     try {
-      setTestResult(await api.testWebhook(url.trim(), secret.trim(), format));
+      // Tests whatever's currently typed in the secret field — since the real
+      // saved secret is never sent to the browser, testing the already-saved
+      // one requires retyping it here first.
+      setTestResult(await api.testWebhook(url.trim(), secretInput.trim(), format));
     } catch (e) {
       setTestResult({ ok: false, error: (e as Error).message });
     } finally {
@@ -77,10 +96,18 @@ export default function SettingsModal({ onClose }: Props) {
     }
   }
 
+  const secretPlaceholder =
+    format === "slack" || format === "discord"
+      ? "not used for this format"
+      : secretSet
+        ? "•••••••• saved — leave blank to keep, or type a new one"
+        : "optional";
+
   const secretHint =
     format === "slack" || format === "discord"
       ? "Slack/Discord put the secret in the webhook URL itself — leave this blank."
-      : "Optional. Sent as an Authorization: Bearer header (e.g. an ntfy access token).";
+      : "Sent as an Authorization: Bearer header (e.g. an ntfy access token). " +
+        "For security this is never sent back to the browser once saved — retype it here to change it or to run a test.";
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -136,9 +163,9 @@ export default function SettingsModal({ onClose }: Props) {
               <input
                 type="password"
                 className="settings-url"
-                placeholder="optional"
-                value={secret}
-                onChange={(e) => setSecret(e.target.value)}
+                placeholder={secretPlaceholder}
+                value={secretInput}
+                onChange={(e) => onSecretChange(e.target.value)}
                 autoComplete="new-password"
               />
               <span className="settings-hint">{secretHint}</span>

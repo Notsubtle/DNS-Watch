@@ -8,10 +8,13 @@ change that only works on one schema fails loudly here.
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import sqlite3
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # Keep the background alert scheduler out of the test process; tests drive
 # evaluate() directly. Must be set before app.main is imported.
@@ -99,3 +102,27 @@ def client(ftl, store):
     from fastapi.testclient import TestClient
     from app.main import app
     return TestClient(app)
+
+
+@pytest.fixture
+def webhook():
+    """A throwaway HTTP server capturing POSTs; yields (url, received list)."""
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            received.append({
+                "auth": self.headers.get("Authorization"),
+                "body": json.loads(self.rfile.read(n) or b"{}"),
+            })
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}/hook", received
+    srv.shutdown()

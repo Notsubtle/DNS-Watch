@@ -98,7 +98,12 @@ def init_store() -> None:
 # Settings (webhook delivery)
 # --------------------------------------------------------------------------
 
-def get_settings() -> dict:
+def _get_raw_settings() -> dict:
+    """Full-fidelity settings, including the plaintext webhook secret.
+
+    Internal use only (currently: actually delivering to the webhook). Never
+    return this directly from an API route — see get_settings().
+    """
     init_store()
     with _connect() as conn:
         rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
@@ -109,6 +114,25 @@ def get_settings() -> dict:
         "webhook_url": d.get("webhook_url", ""),
         "webhook_secret": d.get("webhook_secret", ""),
         "webhook_format": fmt if fmt in VALID_FORMATS else "generic",
+    }
+
+
+def get_settings() -> dict:
+    """Settings as exposed over the API.
+
+    The webhook secret is intentionally never returned in plaintext here — only
+    whether one is currently set. `GET /api/settings` has no stronger access
+    control than the rest of the API (auth is opt-in and off by default), and
+    the secret is a bearer credential for an *external* service (ntfy, Home
+    Assistant, ...), so it shouldn't be readable back out through this app by
+    anyone who can merely reach it.
+    """
+    raw = _get_raw_settings()
+    return {
+        "webhook_enabled": raw["webhook_enabled"],
+        "webhook_url": raw["webhook_url"],
+        "webhook_format": raw["webhook_format"],
+        "webhook_secret_set": bool(raw["webhook_secret"]),
     }
 
 
@@ -444,7 +468,7 @@ def evaluate() -> list[dict]:
     # daemon thread so a slow or unreachable endpoint can't stall the /api/alerts
     # response (which the dashboard polls every few seconds).
     if fired:
-        settings = get_settings()
+        settings = _get_raw_settings()  # needs the real secret to deliver
         if settings["webhook_enabled"] and settings["webhook_url"]:
             payload = _wrap_payload(settings["webhook_format"], _summary(fired), fired)
             threading.Thread(

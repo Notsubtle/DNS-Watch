@@ -2,36 +2,9 @@
 
 from __future__ import annotations
 
-import json
-import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
-import pytest
-
-
-@pytest.fixture
-def webhook():
-    """A throwaway HTTP server capturing POSTs; yields (url, received list)."""
-    received = []
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            n = int(self.headers.get("Content-Length", 0))
-            received.append({
-                "auth": self.headers.get("Authorization"),
-                "body": json.loads(self.rfile.read(n) or b"{}"),
-            })
-            self.send_response(204)
-            self.end_headers()
-
-        def log_message(self, *a):
-            pass
-
-    srv = HTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.server_address[1]}/hook", received
-    srv.shutdown()
+# `webhook` fixture lives in conftest.py (shared with test_webhook_security.py).
 
 
 def _wait(received, before, timeout=5):

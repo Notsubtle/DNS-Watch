@@ -108,8 +108,18 @@ export type WebhookFormat = "generic" | "slack" | "discord";
 export interface AppSettings {
   webhook_enabled: boolean;
   webhook_url: string;
-  webhook_secret: string;
   webhook_format: WebhookFormat;
+  // The server never returns the real secret (it's a bearer credential for an
+  // external service) — only whether one is currently configured.
+  webhook_secret_set: boolean;
+}
+
+export interface AppSettingsUpdate {
+  webhook_enabled?: boolean;
+  webhook_url?: string;
+  webhook_format?: WebhookFormat;
+  // Omit entirely to leave the saved secret untouched; send "" to clear it.
+  webhook_secret?: string;
 }
 
 export interface Filters {
@@ -197,7 +207,7 @@ export const api = {
   deleteRule: (id: number) => sendJson<{ deleted: number }>(`/api/alert-rules/${id}`, "DELETE"),
 
   getSettings: () => getJson<AppSettings>("/api/settings"),
-  updateSettings: (patch: Partial<AppSettings>) =>
+  updateSettings: (patch: AppSettingsUpdate) =>
     sendJson<AppSettings>("/api/settings", "PATCH", patch),
   testWebhook: (url: string, secret: string, format: WebhookFormat) =>
     sendJson<{ ok: boolean; error: string | null }>("/api/settings/test-webhook", "POST", {
