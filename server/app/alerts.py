@@ -13,11 +13,14 @@ cooldown stops the same condition from re-firing on every poll.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import socket
 import sqlite3
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 from app import db
@@ -172,6 +175,55 @@ def _wrap_payload(fmt: str, summary: str, events: list[dict]) -> dict:
     }
 
 
+ALLOWED_WEBHOOK_SCHEMES = {"http", "https"}
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuses to auto-follow redirects. A 3xx response is returned as-is (and
+    treated as a non-2xx failure by the caller) instead of being followed —
+    otherwise a URL that passed our host validation could redirect to a target
+    that wouldn't have."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
+
+
+def _is_unsafe_webhook_target(ip_str: str) -> bool:
+    """True for addresses a user-supplied webhook URL must never reach.
+
+    Deliberately narrow: DNS Watch is a self-hosted LAN tool whose documented
+    webhook feature targets things like a LAN Home Assistant instance or a
+    self-hosted ntfy server, so private (RFC1918) and loopback addresses are
+    intentionally NOT blocked here — that's the legitimate use case, and our own
+    tests deliver to a loopback mock server. What IS blocked: link-local
+    addresses (this covers the 169.254.169.254 cloud-metadata endpoint that's
+    the classic high-value SSRF target), multicast, unspecified, and IETF
+    reserved ranges — none of which are ever a legitimate webhook receiver.
+    """
+    ip = ipaddress.ip_address(ip_str)
+    return ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved
+
+
+def _validate_webhook_url(url: str) -> str | None:
+    """Returns an error message if `url` is unsafe/invalid to fetch, else None."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ALLOWED_WEBHOOK_SCHEMES:
+        return f"unsupported URL scheme {parsed.scheme!r} (must be http or https)"
+    if not parsed.hostname:
+        return "URL has no host"
+    try:
+        ips = {info[4][0] for info in socket.getaddrinfo(parsed.hostname, None)}
+    except OSError as e:
+        return f"could not resolve host: {e}"
+    for ip in ips:
+        if _is_unsafe_webhook_target(ip):
+            return f"refusing to contact {ip} (link-local/metadata/multicast/reserved address)"
+    return None
+
+
 def deliver_webhook(
     url: str, payload: dict, secret: str = "", timeout: float = 5.0
 ) -> tuple[bool, str | None]:
@@ -183,13 +235,16 @@ def deliver_webhook(
     """
     if not url:
         return False, "no webhook URL configured"
+    validation_error = _validate_webhook_url(url)
+    if validation_error:
+        return False, validation_error
     try:
         data = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if secret:
             headers["Authorization"] = f"Bearer {secret}"
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — user-supplied LAN URL
+        with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
             ok = 200 <= resp.status < 300
             return ok, None if ok else f"HTTP {resp.status}"
     except Exception as e:  # noqa: BLE001
