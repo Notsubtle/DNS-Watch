@@ -203,6 +203,13 @@ npm run dev    # http://localhost:5173, proxies /api to :8090
   current Pi-hole versions as of writing, but if you upgrade Pi-hole and see queries
   misclassified, check Pi-hole's FTL changelog for new status codes and adjust that
   set — the raw `status` code is always shown alongside so you can spot mismatches.
+- Pi-hole's on-disk schema is auto-detected (`detect_schema()` in `server/app/db.py`)
+  so this works without configuration whether your FTL build has a `client_id` +
+  `client` table (v6) or a `queries.client` IP joined against `network`/
+  `network_addresses` (older builds, including the real v6 layout where the client
+  name lives on `network_addresses.name` rather than `network.name`). The test
+  suite's synthetic databases (`server/tests/conftest.py`) model all of these shapes
+  so a change that only works against one of them fails in CI.
 - This reads the DB directly rather than going through Pi-hole's API, so it works
   even if you've locked down Pi-hole's admin UI per the hardening guide.
 - SQLite read-only connections don't lock the file, so this has effectively zero
