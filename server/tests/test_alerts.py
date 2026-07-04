@@ -64,6 +64,13 @@ def test_device_quiet_rule(client, ftl):
         for _ in range(30):
             conn.execute("INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,98)",
                          (now - 90 * 60, 1, 2, "a.example.com"))
+    elif ftl["schema"] == "real":
+        conn.execute("INSERT INTO network (id, hwaddr, macVendor) VALUES (98,'de:ad:be:ef:00:62','TestVendor')")
+        conn.execute("INSERT INTO network_addresses (network_id, ip, lastSeen, name, nameUpdated) "
+                     "VALUES (98,'192.168.1.98',?,'oldtv',?)", (now, now))
+        for _ in range(30):
+            conn.execute("INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,'192.168.1.98')",
+                         (float(now - 90 * 60), 1, 2, "a.example.com"))
     else:
         conn.execute("INSERT INTO network VALUES (98,'oldtv')")
         conn.execute("INSERT INTO network_addresses VALUES ('192.168.1.98',98)")

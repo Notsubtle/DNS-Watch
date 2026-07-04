@@ -1,9 +1,17 @@
 """Shared pytest fixtures.
 
 Every db-facing test runs against a freshly-built synthetic Pi-hole FTL database,
-parametrized over BOTH schema shapes DNS Watch supports (old `queries.client`
-text column + `network` tables, and new v6 `client_id` + `client` table), so a
-change that only works on one schema fails loudly here.
+parametrized over the schema shapes DNS Watch supports, so a change that only
+works on one schema fails loudly here:
+
+  - "new": v6-style `queries.client_id` + a `client` table.
+  - "old": `queries.client` TEXT + a `network` table carrying the name.
+  - "real": what a REAL Pi-hole v6 on-disk DB actually looks like — `queries.client`
+    is a TEXT IP with REAL (fractional-second) timestamps, the `network` table has
+    NO name column, and the client name lives on `network_addresses.name`. This
+    variant guards two regressions that only surfaced against a real DB snapshot:
+    selecting `n.name` off a nameless `network` table (500s), and float-division
+    time bucketing that zeroed every timeseries/sparkline bucket.
 """
 
 from __future__ import annotations
@@ -53,6 +61,29 @@ def build_ftl(path: str, schema: str, n: int = 500, seed: int = 1) -> None:
                 (now - random.randint(0, 3600), random.choice(TYPES),
                  random.choice(STATUSES), random.choice(DOMAINS), random.randint(1, len(CLIENTS))),
             )
+    elif schema == "real":
+        # Faithful to a REAL Pi-hole v6 on-disk DB: queries.client is a TEXT IP
+        # with REAL (fractional-second) timestamps, the `network` table has NO
+        # name column, and the client name lives on network_addresses.name.
+        c.execute("CREATE TABLE queries (id INTEGER PRIMARY KEY, timestamp REAL, "
+                  "type INTEGER, status INTEGER, domain TEXT, client TEXT)")
+        c.execute("CREATE TABLE network (id INTEGER PRIMARY KEY, hwaddr TEXT, macVendor TEXT)")
+        c.execute("CREATE TABLE network_addresses (network_id INTEGER, ip TEXT, "
+                  "lastSeen INTEGER, name TEXT, nameUpdated INTEGER)")
+        for i, (ip, name) in enumerate(CLIENTS, 1):
+            c.execute("INSERT INTO network (id, hwaddr, macVendor) VALUES (?,?,?)",
+                      (i, f"de:ad:be:ef:00:{i:02x}", "TestVendor"))
+            c.execute(
+                "INSERT INTO network_addresses (network_id, ip, lastSeen, name, nameUpdated) "
+                "VALUES (?,?,?,?,?)", (i, ip, now, name, now))
+        for _ in range(n):
+            # +random() forces a fractional part so the float-division bucketing
+            # bug actually manifests (integer timestamps would hide it).
+            c.execute(
+                "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                (float(now - random.randint(0, 3600)) + random.random(), random.choice(TYPES),
+                 random.choice(STATUSES), random.choice(DOMAINS), random.choice(CLIENTS)[0]),
+            )
     else:
         c.execute("CREATE TABLE queries (id INTEGER PRIMARY KEY, timestamp INTEGER, "
                   "type INTEGER, status INTEGER, domain TEXT, client TEXT)")
@@ -78,7 +109,7 @@ def truth(path: str):
     return conn
 
 
-@pytest.fixture(params=["new", "old"])
+@pytest.fixture(params=["new", "old", "real"])
 def ftl(request, tmp_path, monkeypatch):
     path = str(tmp_path / "pihole-FTL.db")
     build_ftl(path, request.param)
