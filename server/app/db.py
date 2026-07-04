@@ -51,11 +51,10 @@ def type_name(code: int | None) -> str:
 @dataclass(frozen=True)
 class Schema:
     has_client_table: bool  # True = newer FTL (client_id -> client table)
-    # Old-schema only: where the human-readable client name lives. Real Pi-hole
-    # keeps it on network_addresses.name (keyed by ip); the `network` table has
-    # no `name` column. Some older/synthetic layouts put it on network.name
-    # instead, so we detect which and join accordingly.
-    name_on_network_addresses: bool = False
+    # Real Pi-hole v6 keeps the client NAME on `network_addresses.name` (the
+    # `network` table has no name column). Older builds we've seen put the name
+    # on `network.name`. Detect which so the old-schema join reads the right one.
+    na_has_name: bool = False
 
 
 def _connect() -> sqlite3.Connection:
@@ -70,11 +69,9 @@ def detect_schema() -> Schema:
     with _connect() as conn:
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(queries)")}
         has_client_table = "client_id" in cols
-        # PRAGMA on a missing table returns no rows, so this is safe even when
-        # network_addresses doesn't exist (newer client-table schema).
         na_cols = {row["name"] for row in conn.execute("PRAGMA table_info(network_addresses)")}
-        name_on_na = "name" in na_cols
-    return Schema(has_client_table=has_client_table, name_on_network_addresses=name_on_na)
+        na_has_name = "name" in na_cols
+    return Schema(has_client_table=has_client_table, na_has_name=na_has_name)
 
 
 def _client_join_sql() -> tuple[str, str]:
@@ -83,9 +80,9 @@ def _client_join_sql() -> tuple[str, str]:
     if schema.has_client_table:
         select = "c.ip AS client_ip, c.name AS client_name"
         join = "LEFT JOIN client c ON c.id = q.client_id"
-    elif schema.name_on_network_addresses:
-        # Real Pi-hole: the name lives directly on network_addresses (keyed by
-        # ip). No need to hop through the `network` table (which has no `name`).
+    elif schema.na_has_name:
+        # Real Pi-hole v6: the name lives on network_addresses.name (keyed by ip);
+        # the `network` table has no name column, so don't join it.
         select = "q.client AS client_ip, na.name AS client_name"
         join = "LEFT JOIN network_addresses na ON na.ip = q.client"
     else:
@@ -380,9 +377,9 @@ def timeseries(
 
     where_sql, params = _build_where(client=client, since=win_since, until=win_until)
     # Integer-divide the timestamp into bucket indexes, aggregate per bucket.
-    # CAST to INTEGER: FTL v6 stores timestamp as REAL, and SQLite only does
-    # integer division when BOTH operands are ints — otherwise `bucket` comes
-    # back fractional and never matches the integer bucket indexes below.
+    # Real Pi-hole v6 stores q.timestamp as REAL (fractional seconds); without the
+    # CAST, SQLite does float division and yields fractional bucket ids that never
+    # match the integer bucket indexes we look up below (every bucket reads 0).
     sql = f"""
         SELECT
             CAST((q.timestamp - ?) / ? AS INTEGER) AS bucket,
