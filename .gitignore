@@ -3,6 +3,8 @@ web/dist/
 server/**/__pycache__/
 *.pyc
 .env
+server/build/
+server/*.egg-info/
 
 tsconfig.tsbuildinfo
 
