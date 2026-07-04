@@ -182,8 +182,15 @@ npm run dev    # http://localhost:5173, proxies /api to :8090
   `text`/`content` plus structured `alerts`), *Slack* (top-level `text`), or
   *Discord* (`content`, capped at Discord's limit). An optional **auth token** is
   sent as an `Authorization: Bearer` header (e.g. an ntfy access token) — for
-  Slack/Discord the secret is already in the URL, so leave it blank. Delivery runs
-  off-thread, so a slow or unreachable endpoint never affects the dashboard.
+  Slack/Discord the secret is already in the URL, so leave it blank. For security
+  the saved token is **never sent back to the browser**, so the field is blank when
+  you reopen Settings — leave it blank to keep the current token, or retype it to
+  change it or to run a test. Delivery runs off-thread, so a slow or unreachable
+  endpoint never affects the dashboard. The target URL must be an ordinary
+  `http(s)` receiver — private/LAN and loopback addresses are allowed (that's the
+  point), but link-local/cloud-metadata (`169.254.x`), multicast, and reserved
+  addresses are refused and redirects aren't followed, to prevent the webhook from
+  being abused to probe the host's own network.
 - **Client naming** — pulls names Pi-hole already knows (from DHCP lease / your
   manual naming in Pi-hole's own UI); no separate naming step needed.
 - **Optional login** — set `DNSWATCH_AUTH_PASSWORD` (see `.env.example`) to gate the
