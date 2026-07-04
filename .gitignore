@@ -8,5 +8,8 @@ server/*.egg-info/
 
 tsconfig.tsbuildinfo
 
+# UAT: snapshot of the real Pi-hole DB (contains real DNS history — never commit)
+uat/pihole-data/
+
 # Local Claude Code settings (machine-specific)
 .claude/settings.local.json

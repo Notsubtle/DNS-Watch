@@ -51,6 +51,11 @@ def type_name(code: int | None) -> str:
 @dataclass(frozen=True)
 class Schema:
     has_client_table: bool  # True = newer FTL (client_id -> client table)
+    # Old-schema only: where the human-readable client name lives. Real Pi-hole
+    # keeps it on network_addresses.name (keyed by ip); the `network` table has
+    # no `name` column. Some older/synthetic layouts put it on network.name
+    # instead, so we detect which and join accordingly.
+    name_on_network_addresses: bool = False
 
 
 def _connect() -> sqlite3.Connection:
@@ -65,7 +70,11 @@ def detect_schema() -> Schema:
     with _connect() as conn:
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(queries)")}
         has_client_table = "client_id" in cols
-    return Schema(has_client_table=has_client_table)
+        # PRAGMA on a missing table returns no rows, so this is safe even when
+        # network_addresses doesn't exist (newer client-table schema).
+        na_cols = {row["name"] for row in conn.execute("PRAGMA table_info(network_addresses)")}
+        name_on_na = "name" in na_cols
+    return Schema(has_client_table=has_client_table, name_on_network_addresses=name_on_na)
 
 
 def _client_join_sql() -> tuple[str, str]:
@@ -74,6 +83,11 @@ def _client_join_sql() -> tuple[str, str]:
     if schema.has_client_table:
         select = "c.ip AS client_ip, c.name AS client_name"
         join = "LEFT JOIN client c ON c.id = q.client_id"
+    elif schema.name_on_network_addresses:
+        # Real Pi-hole: the name lives directly on network_addresses (keyed by
+        # ip). No need to hop through the `network` table (which has no `name`).
+        select = "q.client AS client_ip, na.name AS client_name"
+        join = "LEFT JOIN network_addresses na ON na.ip = q.client"
     else:
         select = "q.client AS client_ip, n.name AS client_name"
         join = (
@@ -366,9 +380,12 @@ def timeseries(
 
     where_sql, params = _build_where(client=client, since=win_since, until=win_until)
     # Integer-divide the timestamp into bucket indexes, aggregate per bucket.
+    # CAST to INTEGER: FTL v6 stores timestamp as REAL, and SQLite only does
+    # integer division when BOTH operands are ints — otherwise `bucket` comes
+    # back fractional and never matches the integer bucket indexes below.
     sql = f"""
         SELECT
-            ((q.timestamp - ?) / ?) AS bucket,
+            CAST((q.timestamp - ?) / ? AS INTEGER) AS bucket,
             SUM(CASE WHEN q.status IN ({allowed_in}) THEN 1 ELSE 0 END) AS allowed,
             SUM(CASE WHEN q.status IN ({blocked_in}) THEN 1 ELSE 0 END) AS blocked,
             COUNT(*) AS total
@@ -467,7 +484,7 @@ def client_activity(
         # 3) Sparkline buckets for all top clients at once.
         spark_rows = conn.execute(
             f"""
-            SELECT {ccol} AS ipcol, ((q.timestamp - ?) / ?) AS bucket, COUNT(*) AS n
+            SELECT {ccol} AS ipcol, CAST((q.timestamp - ?) / ? AS INTEGER) AS bucket, COUNT(*) AS n
             FROM queries q
             {join}
             WHERE {where_sql} AND {ccol} IN ({placeholders})

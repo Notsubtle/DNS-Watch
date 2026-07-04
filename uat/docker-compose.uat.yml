@@ -1,0 +1,80 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# DNS Watch — UAT (User Acceptance Testing) environment
+#
+# Two ways to run, both reading a read-only SNAPSHOT of the real Pi-hole DB
+# (created by ./snapshot-pihole-db.sh — run that FIRST). Nothing here touches
+# the live Pi-hole database or your production DNS Watch state.
+#
+#   1) Hot-reload dev stack (default) — iterate fast, see changes instantly:
+#          docker compose -f uat/docker-compose.uat.yml up --build
+#      • web (Vite HMR)  -> http://localhost:5173   ← open this one
+#      • api (uvicorn --reload) -> http://localhost:8091
+#      Edit web/src/** or server/app/** and the browser/API refresh on save.
+#
+#   2) Prod-like preview — byte-identical to what ships, for final sign-off:
+#          docker compose -f uat/docker-compose.uat.yml --profile prod up --build app
+#      • app (built image) -> http://localhost:8092
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  # ── Hot-reload backend (default) ───────────────────────────────────────────
+  api:
+    build:
+      context: ..
+      dockerfile: uat/api.Dockerfile
+    container_name: dnswatch-uat-api
+    ports:
+      - "8091:8090"
+    environment:
+      PIHOLE_DB_PATH: /pihole-data/pihole-FTL.db
+      DNSWATCH_DB_PATH: /data/dnswatch.db
+      ALERT_EVAL_INTERVAL_SECONDS: 60
+    volumes:
+      # Live-mounted source → uvicorn --reload picks up edits.
+      - ../server/app:/srv/app
+      # Read-only snapshot of the real Pi-hole FTL DB.
+      - ./pihole-data/pihole-FTL.db:/pihole-data/pihole-FTL.db:ro
+      # Throwaway writable store for alert rules/events (never prod's).
+      - dnswatch-uat-data:/data
+    restart: unless-stopped
+
+  # ── Hot-reload frontend (default) ──────────────────────────────────────────
+  web:
+    image: node:22-alpine
+    container_name: dnswatch-uat-web
+    working_dir: /web
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+    environment:
+      # vite.config.ts reads this so the dev proxy reaches the api container
+      # (instead of localhost:8090, which is meaningless inside the network).
+      VITE_PROXY_TARGET: http://api:8090
+    ports:
+      - "5173:5173"
+    volumes:
+      - ../web:/web
+      # Anonymous volume so the container's node_modules isn't clobbered by the
+      # host bind-mount (and the host stays clean).
+      - /web/node_modules
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # ── Prod-like single container (opt-in: --profile prod) ────────────────────
+  app:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    container_name: dnswatch-uat-prod
+    profiles: ["prod"]
+    ports:
+      - "8092:8090"
+    environment:
+      PIHOLE_DB_PATH: /pihole-data/pihole-FTL.db
+      DNSWATCH_DB_PATH: /data/dnswatch.db
+      ALERT_EVAL_INTERVAL_SECONDS: 60
+    volumes:
+      - ./pihole-data/pihole-FTL.db:/pihole-data/pihole-FTL.db:ro
+      - dnswatch-uat-data:/data
+    restart: unless-stopped
+
+volumes:
+  dnswatch-uat-data:
