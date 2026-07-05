@@ -12,6 +12,11 @@ COPY server/pyproject.toml ./
 COPY server/app ./app
 RUN pip install --no-cache-dir . --break-system-packages
 
+# Non-root, matching server/Dockerfile — UID 1000 also matches the host user
+# whose files get bind-mounted here in the UAT compose file.
+RUN useradd -r -u 1000 appuser && mkdir -p /data && chown -R appuser:appuser /srv /data
+USER appuser
+
 # app/ is bind-mounted at runtime; --reload-dir watches those live files.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090", \
      "--reload", "--reload-dir", "/srv/app"]
