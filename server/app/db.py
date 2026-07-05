@@ -781,7 +781,23 @@ def simulate_pattern(pattern: str, since: int) -> dict:
     # finding #4). A timed-out row is treated as "no match" rather than
     # raising: conservative (only undercounts that one pathological row)
     # and never lets a single row stall the whole scan.
-    timed = _timed_regex.compile(pattern)
+    #
+    # Trade-off, deliberately accepted: `regex`'s per-call timeout has real
+    # overhead (measured ~6-7x slower per call than a timeout-less search).
+    # Across a full 7-day scan that adds a few seconds, not milliseconds —
+    # acceptable for a button-triggered batch operation that already opts
+    # into exact (not sampled) counts at a real cost, per the docstring
+    # above, but worth knowing if this function's latency ever matters more
+    # than it does today.
+    try:
+        timed = _timed_regex.compile(pattern)
+    except _timed_regex.error as e:
+        # `regex`'s accepted syntax isn't 100% identical to stdlib `re`'s —
+        # a pattern that passed the re.compile() check above can still be
+        # rejected here. Re-raise as re.error so main.py's existing
+        # `except re.error` still maps this to a clean 400 instead of an
+        # unhandled 500.
+        raise re.error(str(e)) from e
     _MATCH_TIMEOUT_SECONDS = 0.5
 
     def _regexp(_pattern_arg: str, value: str | None) -> int:

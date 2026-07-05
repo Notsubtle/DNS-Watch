@@ -124,6 +124,23 @@ def test_pathological_pattern_does_not_hang(ftl):
     assert isinstance(result["total_matches"], int)
 
 
+def test_regex_engine_compile_failure_still_raises_re_error(ftl, monkeypatch):
+    """Regression: db.py validates syntax with stdlib `re` but matches with
+    the third-party `regex` engine (for the per-row match timeout), whose
+    accepted syntax isn't 100% identical to `re`'s. If `regex` ever rejects a
+    pattern `re` accepted, simulate_pattern must still raise re.error (which
+    main.py maps to a clean 400) rather than an unhandled regex.error
+    propagating as an unexpected 500."""
+    from app import db
+
+    def fake_compile(pattern):
+        raise db._timed_regex.error("simulated regex-only rejection")
+
+    monkeypatch.setattr(db._timed_regex, "compile", fake_compile)
+    with pytest.raises(re.error):
+        db.simulate_pattern("harmless", since=0)
+
+
 def test_api_valid_pattern_returns_full_shape(client):
     resp = client.post("/api/simulate-blocklist", json={"pattern": "tracker", "range": "7d"})
     assert resp.status_code == 200
