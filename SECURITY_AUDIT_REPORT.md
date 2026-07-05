@@ -20,6 +20,25 @@ All 9 numbered "Findings — Security" items below were addressed in a follow-up
 
 Full test suite: **235 passed** (up from 211 at audit time — 9 new regression tests added for fixes #1, #3, and #4) via `docker run ... python -m pytest -q`. No frontend files were touched, so `tsc --noEmit` wasn't re-run for this pass.
 
+## Code review of the fixes themselves
+
+An 8-angle multi-agent code review (correctness, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) ran against the fix commits before anything was pushed. It found **4 real bugs introduced by the fixes**, all corrected and covered by new regression tests:
+
+| Bug found | Where | Fix |
+|---|---|---|
+| CSRF guard bypassable via `Origin: null` | `main.py` `csrf_guard` | An opaque "null" Origin (sandboxed iframes, some cross-origin redirects) parses to an empty netloc, which the original check treated as "no conflict" and let through. Now rejects on *any* mismatch, including empty. |
+| Malformed Host header for IPv6 webhook targets | `alerts.py` `deliver_webhook` | `parsed.hostname` strips brackets from an IPv6 literal; building `Host: hostname:port` naively produced `fe80::1:8443` instead of the RFC 7230-required `[fe80::1]:8443`, breaking delivery to IPv6 targets on non-default ports. Added `_host_header()` to bracket correctly. |
+| Socket leak on TLS handshake failure | `alerts.py` `_PinnedHTTPSConnection` | `self.sock` was only assigned after `wrap_socket()` succeeded, so a receiver that accepted the TCP connection but failed/never completed the handshake leaked the raw socket every delivery attempt. Now closed on any wrap failure; the class also now delegates the raw connect to `HTTPConnection.connect()` instead of reimplementing it, restoring `TCP_NODELAY` and the stdlib connect audit hook the original override silently dropped. |
+| Uncaught 500 from `regex`/`re` syntax divergence | `db.py` `simulate_pattern` | Syntax is validated with stdlib `re` but matched with the third-party `regex` engine (for the per-row timeout); `regex.error` isn't a subclass of `re.error`, so a pattern `regex` rejected that `re` accepted raised an unhandled exception instead of the intended 400. Now re-raised as `re.error`. |
+
+It also flagged one **real deployment regression** in the non-root Docker fix (not a bug in application code): switching to a non-root `appuser` only fixes ownership of `/data` at *image build* time — it does nothing for an existing `dnswatch-data` volume created by an older, root-run deployment, whose `dnswatch.db` would stay root-owned and become unwritable after upgrading, silently breaking alert-rule persistence. Fixed with a `docker-entrypoint.sh` that starts as root, chowns `/data`, then drops to `appuser` via `su` before exec'ing the real process — verified with an actual `docker build` + `docker run` against a simulated pre-existing root-owned `dnswatch.db`, not just code inspection.
+
+A `limit=0`/negative-value inconsistency was also fixed as a byproduct: `/api/queries`, `/api/tail`, and `/api/queries.csv` now reject out-of-range values with FastAPI's normal 422 (via `ge=` bounds, matching every other bounded query param in `main.py`) instead of silently reinterpreting them deeper in `db.py` while echoing the caller's original, wrong value back in the response body.
+
+**Lower-priority items noted but not changed:** the CSRF guard's Host-header comparison assumes a reverse proxy forwards the original `Host` unchanged (documented as a caveat in the docstring rather than built into a full trusted-origins allowlist); the `regex` module's per-row timeout has real overhead (~6-7x slower per call, benchmarked) which is an accepted trade-off for this button-triggered batch operation, not a hot path; and a couple of pure duplicated-magic-number/DRY observations (the `limit`/`offset` clamp values live in both `main.py` and `db.py` with no shared constant) were left as-is since fixing them would be a larger refactor for a non-functional concern.
+
+Full test suite after the code-review fixes: **242 passed**.
+
 ## Summary
 
 Overall risk posture is **moderate**, appropriate for a self-hosted LAN tool with optional auth. The two invariants that matter most both hold up well: the Pi-hole FTL database is opened read-only through a single, consistently-used connection helper with no bypass, and the webhook secret is never returned by the settings API. However, the SSRF guard on the webhook feature has a genuine **DNS-rebinding TOCTOU gap** (validates a hostname's resolved IPs, then lets a separate HTTP client re-resolve the same hostname at connect time), and this is made directly triggerable by an unauthenticated-by-default `test-webhook` endpoint with no CSRF protection. These two combine into the highest-priority finding: an attacker who gets a LAN user to load a malicious page (or who is on the LAN with SSRF-as-a-service reachable) can force the server to make outbound requests to arbitrary internal targets, bypassing the link-local/metadata blocklist. No SQL injection or Pi-hole write-safety issues were found. No frontend XSS was found.
