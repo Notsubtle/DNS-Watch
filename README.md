@@ -203,7 +203,11 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   `http(s)` receiver — private/LAN and loopback addresses are allowed (that's the
   point), but link-local/cloud-metadata (`169.254.x`), multicast, and reserved
   addresses are refused and redirects aren't followed, to prevent the webhook from
-  being abused to probe the host's own network.
+  being abused to probe the host's own network. The hostname is resolved once and
+  the delivery connects to that exact validated address — it's never re-resolved
+  for the actual request — so a DNS record that changes between the check and the
+  delivery can't be used to redirect the request to a blocked target after the
+  fact.
 - **Client naming** — pulls names Pi-hole already knows (from DHCP lease / your
   manual naming in Pi-hole's own UI); no separate naming step needed.
 - **Automatic anomaly detection** — a **Network Anomalies** panel flags clients that
@@ -211,8 +215,16 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   *own* rolling 7-day hourly baseline (fixed thresholds, always on — distinct from the
   configurable Alert rules above, and needing no setup). Click one to jump the
   dashboard to the window it fired in.
-- **Optional login** — set `DNSWATCH_AUTH_PASSWORD` (see `.env.example`) to gate the
-  whole app behind HTTP Basic auth. Left unset, it's open on your LAN as before.
+- **Optional login** — set `DNSWATCH_AUTH_PASSWORD` (or `DNSWATCH_AUTH_PASSWORD_FILE`
+  to read it from a mounted file/Docker secret instead — see `.env.example`) to gate
+  the whole app behind HTTP Basic auth. Left unset, it's open on your LAN as before.
+  When enabled, state-changing requests (creating/deleting alert rules, changing
+  webhook settings, running the blocklist simulator) are also rejected if the
+  browser reports they came from a different origin — Basic auth alone doesn't stop
+  a malicious page from riding a browser's cached credentials, so this closes that
+  gap. It only looks at the `Origin`/`Referer` headers browsers already send; normal
+  use of the dashboard, and non-browser clients that send neither header, are
+  unaffected.
 
 ## Analysis tabs
 
@@ -262,3 +274,7 @@ Beyond the dashboard, three purpose-built views for digging into a specific ques
   it as sensitive. The optional Basic auth guards access, but it's cleartext over
   HTTP — if DNS Watch is reachable beyond a trusted LAN, front it with a TLS
   reverse proxy (Caddy, nginx, Traefik).
+- The backend container runs as a non-root user (UID 1000), matching the default
+  first-user UID on most single-user Linux hosts. If your `PIHOLE_ETC_PATH` files or
+  the `dnswatch-data` volume aren't readable/writable by that UID on your host,
+  either adjust their permissions or run the container with a different `--user`.
