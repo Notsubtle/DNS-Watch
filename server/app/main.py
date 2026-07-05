@@ -121,12 +121,24 @@ async def csrf_guard(request, call_next):
     header (curl, server-to-server calls) are let through unchanged — this
     closes the browser-driven CSRF path, not a hardened defense against a
     client that can forge headers outright.
+
+    Caveat for reverse-proxy deployments (the README's recommended setup for
+    anything beyond a trusted LAN): this compares against whatever `Host`
+    header reaches THIS process, so the proxy must forward the original
+    Host unchanged (the common default for Caddy/nginx/Traefik) or
+    legitimate same-origin requests get rejected here too.
     """
     if request.method in _STATE_CHANGING_METHODS:
         source = request.headers.get("origin") or request.headers.get("referer")
         if source:
+            # Reject on ANY mismatch, including an empty netloc — an opaque
+            # "null" Origin (sandboxed iframes, some cross-origin redirects)
+            # parses to an empty netloc and must never be treated as a free
+            # pass just because it doesn't positively contradict the Host
+            # header. The legitimate dashboard never sends "null" or an
+            # unparseable Origin for its own same-origin requests.
             source_host = urlparse(source).netloc
-            if source_host and source_host != request.headers.get("host", ""):
+            if source_host != request.headers.get("host", ""):
                 return Response(status_code=403, content="cross-origin request rejected")
     return await call_next(request)
 
@@ -166,8 +178,8 @@ def api_queries(
     range: str | None = "1h",
     since: int | None = None,
     until: int | None = None,
-    limit: int = Query(200, le=1000),
-    offset: int = 0,
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
 ):
     effective_since = _since_from_range(range, since)
     rows = db.list_queries(client, domain, status, effective_since, until, limit, offset)
@@ -176,7 +188,7 @@ def api_queries(
 
 
 @app.get("/api/tail")
-def api_tail(since: float, since_id: int = 0, limit: int = Query(500, le=2000)):
+def api_tail(since: float, since_id: int = 0, limit: int = Query(500, ge=1, le=2000)):
     """Polling-friendly 'everything new since my last row' feed for the Live
     Stream console. No default for `since` — the frontend must pass the
     current time on first mount, or a first call would dump the client's
@@ -215,7 +227,7 @@ def api_queries_csv(
     range: str | None = "1h",
     since: int | None = None,
     until: int | None = None,
-    limit: int = Query(10000, le=100000),
+    limit: int = Query(10000, ge=1, le=100000),
 ):
     """Export the current query view as CSV. Higher default cap than the paged
     JSON endpoint since an export is expected to be the whole matching set."""

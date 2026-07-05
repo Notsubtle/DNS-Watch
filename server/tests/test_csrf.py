@@ -18,6 +18,20 @@ def test_cross_origin_post_rejected(client):
     assert r.status_code == 403
 
 
+def test_null_origin_rejected(client):
+    """Regression: an opaque "null" Origin (sent by sandboxed iframes and some
+    cross-origin redirects) parses to an empty netloc via urlparse(). The
+    first version of this guard only rejected on a NON-EMPTY mismatching
+    netloc, so "null" fell through as if it were a same-origin request —
+    exactly the CSRF this middleware exists to stop."""
+    r = client.post(
+        "/api/alert-rules",
+        json={"name": "x", "type": "new_device", "params": {}},
+        headers={"Origin": "null"},
+    )
+    assert r.status_code == 403
+
+
 def test_same_origin_post_allowed(client):
     r = client.post(
         "/api/alert-rules",

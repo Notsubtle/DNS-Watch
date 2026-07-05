@@ -57,6 +57,18 @@ def test_validator_returns_the_pinned_ip_on_success():
     assert ip == "127.0.0.1"
 
 
+def test_host_header_brackets_ipv6_literals():
+    """Regression: the Host header for an IPv6 literal target must bracket
+    the address ("[fe80::1]:8443", not "fe80::1:8443", which is malformed/
+    ambiguous per RFC 7230) — urlparse().hostname strips the brackets, so
+    building the header naively from it drops them."""
+    from app.alerts import _host_header
+    assert _host_header("fe80::1", 8443, 443) == "[fe80::1]:8443"
+    assert _host_header("fe80::1", 443, 443) == "[fe80::1]"
+    assert _host_header("example.com", 8443, 443) == "example.com:8443"
+    assert _host_header("example.com", 443, 443) == "example.com"
+
+
 def test_deliver_webhook_rejects_before_any_network_call():
     # A literal IP needs no DNS lookup, so this stays fast and deterministic
     # regardless of the test environment's network access.

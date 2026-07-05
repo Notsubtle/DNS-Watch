@@ -250,6 +250,12 @@ def _validate_webhook_url(url: str) -> tuple[str | None, str | None]:
     for ip in ips:
         if _is_unsafe_webhook_target(ip):
             return None, f"refusing to contact {ip} (link-local/metadata/multicast/reserved address)"
+    # Every candidate in `ips` was already validated as safe by the loop
+    # above (it would have returned by now otherwise), so picking any one of
+    # them — sorted() just for a deterministic choice — is safe. This is
+    # NOT a "pick the first and check only that one" shortcut; if this ever
+    # gets refactored, keep the "reject if ANY resolved IP is unsafe" check
+    # ahead of the selection.
     return sorted(ips)[0], None
 
 
@@ -257,16 +263,38 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     """An HTTPSConnection that connects to a pre-validated literal IP — never
     re-resolving the hostname — while still doing normal TLS certificate
     verification and SNI against the real hostname. This is the IP pinning
-    that closes the DNS-rebinding gap in `_validate_webhook_url`."""
+    that closes the DNS-rebinding gap in `_validate_webhook_url`.
+
+    Delegates the raw TCP connect to HTTPConnection.connect() (self.host is
+    already the pinned IP, so no re-resolution happens there either) rather
+    than reimplementing it, so TCP_NODELAY and the stdlib's connect audit
+    hook still apply. Only the TLS wrap is overridden, to pass the real
+    hostname as `server_hostname` instead of the pinned IP HTTPSConnection's
+    default `connect()` would otherwise use — the whole reason this class
+    exists. The raw socket is closed if the TLS handshake itself fails, so a
+    receiver that accepts the TCP connection but never completes (or fails)
+    the handshake can't leak a file descriptor per delivery attempt.
+    """
 
     def __init__(self, ip: str, port: int, verify_hostname: str, timeout: float):
         super().__init__(ip, port, timeout=timeout)
         self._verify_hostname = verify_hostname
 
     def connect(self):
-        sock = socket.create_connection((self.host, self.port), self.timeout)
-        context = self._context or ssl.create_default_context()
-        self.sock = context.wrap_socket(sock, server_hostname=self._verify_hostname)
+        http.client.HTTPConnection.connect(self)
+        try:
+            self.sock = self._context.wrap_socket(self.sock, server_hostname=self._verify_hostname)
+        except Exception:
+            self.sock.close()
+            raise
+
+
+def _host_header(hostname: str, port: int, default_port: int) -> str:
+    """Build a Host header value, bracketing IPv6 literals per RFC 7230 —
+    `hostname:port` for an IPv6 literal (e.g. "fe80::1:8443") is ambiguous/
+    malformed; it must be `[fe80::1]:8443`."""
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    return host if port == default_port else f"{host}:{port}"
 
 
 def deliver_webhook(
@@ -294,12 +322,10 @@ def deliver_webhook(
         data = json.dumps(payload).encode("utf-8")
         default_port = 443 if parsed.scheme == "https" else 80
         port = parsed.port or default_port
-        host_header = (
-            parsed.hostname
-            if not parsed.port or parsed.port == default_port
-            else f"{parsed.hostname}:{parsed.port}"
-        )
-        headers = {"Content-Type": "application/json", "Host": host_header}
+        headers = {
+            "Content-Type": "application/json",
+            "Host": _host_header(parsed.hostname, port, default_port),
+        }
         if secret:
             headers["Authorization"] = f"Bearer {secret}"
         path = parsed.path or "/"
