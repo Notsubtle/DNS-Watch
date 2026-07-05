@@ -13,15 +13,16 @@ cooldown stops the same condition from re-firing on every poll.
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import os
 import socket
 import sqlite3
+import ssl
 import threading
 import time
 import urllib.parse
-import urllib.request
 
 from app import db
 
@@ -202,19 +203,6 @@ def _wrap_payload(fmt: str, summary: str, events: list[dict]) -> dict:
 ALLOWED_WEBHOOK_SCHEMES = {"http", "https"}
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Refuses to auto-follow redirects. A 3xx response is returned as-is (and
-    treated as a non-2xx failure by the caller) instead of being followed —
-    otherwise a URL that passed our host validation could redirect to a target
-    that wouldn't have."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
-
-
 def _is_unsafe_webhook_target(ip_str: str) -> bool:
     """True for addresses a user-supplied webhook URL must never reach.
 
@@ -228,24 +216,57 @@ def _is_unsafe_webhook_target(ip_str: str) -> bool:
     reserved ranges — none of which are ever a legitimate webhook receiver.
     """
     ip = ipaddress.ip_address(ip_str)
+    if ip.is_loopback:
+        # Checked first and returned early so loopback can't be caught
+        # incidentally by a rule below meant for something else — IPv6 ::1
+        # falls inside the ::/8 range is_reserved checks, which would
+        # otherwise block loopback for IPv6 only, contradicting the "loopback
+        # allowed for both families" policy stated above.
+        return False
     return ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved
 
 
-def _validate_webhook_url(url: str) -> str | None:
-    """Returns an error message if `url` is unsafe/invalid to fetch, else None."""
+def _validate_webhook_url(url: str) -> tuple[str | None, str | None]:
+    """Validate `url` and resolve it to a single literal IP that has already
+    passed the safety check above. Returns (pinned_ip, error) — exactly one
+    of the two is set.
+
+    The caller MUST connect to `pinned_ip` directly and must NOT let the HTTP
+    client re-resolve the hostname to open the real connection. Resolving
+    once here for validation and again later for delivery is a DNS-rebinding
+    TOCTOU: an attacker-controlled domain with a short TTL can resolve to a
+    safe address for this check, then to 169.254.169.254 (or another blocked
+    target) moments later when the real connection opens.
+    """
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ALLOWED_WEBHOOK_SCHEMES:
-        return f"unsupported URL scheme {parsed.scheme!r} (must be http or https)"
+        return None, f"unsupported URL scheme {parsed.scheme!r} (must be http or https)"
     if not parsed.hostname:
-        return "URL has no host"
+        return None, "URL has no host"
     try:
         ips = {info[4][0] for info in socket.getaddrinfo(parsed.hostname, None)}
     except OSError as e:
-        return f"could not resolve host: {e}"
+        return None, f"could not resolve host: {e}"
     for ip in ips:
         if _is_unsafe_webhook_target(ip):
-            return f"refusing to contact {ip} (link-local/metadata/multicast/reserved address)"
-    return None
+            return None, f"refusing to contact {ip} (link-local/metadata/multicast/reserved address)"
+    return sorted(ips)[0], None
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """An HTTPSConnection that connects to a pre-validated literal IP — never
+    re-resolving the hostname — while still doing normal TLS certificate
+    verification and SNI against the real hostname. This is the IP pinning
+    that closes the DNS-rebinding gap in `_validate_webhook_url`."""
+
+    def __init__(self, ip: str, port: int, verify_hostname: str, timeout: float):
+        super().__init__(ip, port, timeout=timeout)
+        self._verify_hostname = verify_hostname
+
+    def connect(self):
+        sock = socket.create_connection((self.host, self.port), self.timeout)
+        context = self._context or ssl.create_default_context()
+        self.sock = context.wrap_socket(sock, server_hostname=self._verify_hostname)
 
 
 def deliver_webhook(
@@ -256,21 +277,47 @@ def deliver_webhook(
 
     A non-empty `secret` is sent as `Authorization: Bearer <secret>`, which
     covers ntfy access tokens and any receiver that checks a bearer credential.
+
+    Connects to the literal IP `_validate_webhook_url` already validated
+    (never re-resolving the hostname — see that function's docstring) and
+    does not follow redirects: a 3xx response is returned as-is and treated
+    as a non-2xx failure, since a URL that passed validation could redirect
+    to a target that wouldn't have.
     """
     if not url:
         return False, "no webhook URL configured"
-    validation_error = _validate_webhook_url(url)
+    pinned_ip, validation_error = _validate_webhook_url(url)
     if validation_error:
         return False, validation_error
+    parsed = urllib.parse.urlparse(url)
     try:
         data = json.dumps(payload).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
+        default_port = 443 if parsed.scheme == "https" else 80
+        port = parsed.port or default_port
+        host_header = (
+            parsed.hostname
+            if not parsed.port or parsed.port == default_port
+            else f"{parsed.hostname}:{parsed.port}"
+        )
+        headers = {"Content-Type": "application/json", "Host": host_header}
         if secret:
             headers["Authorization"] = f"Bearer {secret}"
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+
+        if parsed.scheme == "https":
+            conn = _PinnedHTTPSConnection(pinned_ip, port, parsed.hostname, timeout=timeout)
+        else:
+            conn = http.client.HTTPConnection(pinned_ip, port, timeout=timeout)
+        try:
+            conn.request("POST", path, body=data, headers=headers)
+            resp = conn.getresponse()
+            resp.read()  # drain fully before closing
             ok = 200 <= resp.status < 300
             return ok, None if ok else f"HTTP {resp.status}"
+        finally:
+            conn.close()
     except Exception as e:  # noqa: BLE001
         return False, str(e)
 
