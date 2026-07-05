@@ -89,6 +89,41 @@ def test_api_clamps_window_to_seven_days_even_if_range_wider(client):
     assert now - 7 * 86400 - 5 <= body["since"] <= now - 7 * 86400 + 5
 
 
+def test_pathological_pattern_does_not_hang(ftl):
+    """Regression for the ReDoS finding: a classic catastrophic-backtracking
+    pattern matched against an adversarial domain must not hang the worker —
+    the per-row match timeout in db.simulate_pattern() must kick in and treat
+    that one row as a non-match rather than blocking the whole scan. Domain
+    names logged by Pi-hole are attacker-influenceable (DHCP hostnames land
+    here too), so this pairing is a realistic worst case, not a contrived one.
+    """
+    import sqlite3
+
+    from app import db
+
+    conn = sqlite3.connect(ftl["path"])
+    domain = "a" * 40 + "!"  # never matches (a+)+$ -> worst-case backtracking
+    if ftl["schema"] == "new":
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,?)",
+            (time.time(), 1, 2, domain, 1),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (time.time(), 1, 2, domain, "192.168.1.10"),
+        )
+    conn.commit()
+    conn.close()
+
+    start = time.time()
+    result = db.simulate_pattern(r"(a+)+$", since=0)
+    elapsed = time.time() - start
+
+    assert elapsed < 5  # bounded by the per-row timeout, not the pattern's worst case
+    assert isinstance(result["total_matches"], int)
+
+
 def test_api_valid_pattern_returns_full_shape(client):
     resp = client.post("/api/simulate-blocklist", json={"pattern": "tracker", "range": "7d"})
     assert resp.status_code == 200

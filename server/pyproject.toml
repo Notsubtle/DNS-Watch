@@ -5,6 +5,11 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+    # Used only for a per-row match timeout in db.simulate_pattern() — stdlib
+    # `re` has no way to bound a pathological user-supplied pattern's
+    # runtime, which is otherwise a ReDoS vector against the blocklist
+    # simulator (see SECURITY_AUDIT_REPORT.md finding #4).
+    "regex>=2024.4.16",
 ]
 
 [project.optional-dependencies]

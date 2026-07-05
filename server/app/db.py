@@ -24,6 +24,8 @@ import re
 import sqlite3
 import statistics
 import time
+
+import regex as _timed_regex
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -120,14 +122,24 @@ def _status_case() -> str:
     )
 
 
+VALID_STATUS_FILTERS = {"all", "blocked", "allowed", "unknown"}
+
+
 def _status_where(status: str | None) -> str | None:
     """SQL predicate (no params) restricting q.status to a resolved category.
 
-    Returns None for "all"/None so no status restriction is applied. Filtering
-    in SQL (rather than post-filtering fetched rows in Python) is what lets
-    LIMIT/OFFSET and COUNT(*) stay correct for status-filtered views.
+    Returns None for "all"/None/anything unrecognized, so no status
+    restriction is applied — matches prior behavior. Checked against an
+    explicit allowlist (rather than an if/elif chain that happens to fall
+    through safely today) as defense-in-depth: it stays impossible for a
+    future refactor to string-format an unvalidated `status` value into the
+    SQL text below, even though every branch here already builds its SQL
+    from fixed int sets (BLOCKED_STATUSES/ALLOWED_STATUSES), never from
+    `status` itself. Filtering in SQL (rather than post-filtering fetched
+    rows in Python) is what lets LIMIT/OFFSET and COUNT(*) stay correct for
+    status-filtered views.
     """
-    if not status or status == "all":
+    if not status or status not in VALID_STATUS_FILTERS or status == "all":
         return None
     blocked = ",".join(str(s) for s in BLOCKED_STATUSES)
     allowed = ",".join(str(s) for s in ALLOWED_STATUSES)
@@ -135,9 +147,7 @@ def _status_where(status: str | None) -> str | None:
         return f"q.status IN ({blocked})"
     if status == "allowed":
         return f"q.status IN ({allowed})"
-    if status == "unknown":
-        return f"q.status NOT IN ({blocked},{allowed})"
-    return None
+    return f"q.status NOT IN ({blocked},{allowed})"  # "unknown"
 
 
 def _build_where(
@@ -160,8 +170,12 @@ def _build_where(
         where.append(f"{_client_ip_col()} = ?")
         params.append(client)
     if domain:
+        # Cap at the max valid DNS name length (253) before building the
+        # LIKE pattern. A leading '%' already forces a full table scan; an
+        # unbounded caller-supplied length on top of that is a cheap DoS
+        # lever with no legitimate use (no real domain is longer than this).
         where.append("q.domain LIKE ?")
-        params.append(f"%{domain}%")
+        params.append(f"%{domain[:253]}%")
     if since:
         where.append("q.timestamp >= ?")
         params.append(since)
@@ -204,6 +218,12 @@ def list_queries(
     limit: int = 200,
     offset: int = 0,
 ) -> list[dict]:
+    # Bounded here (not just at the HTTP layer in main.py) so any other
+    # caller of this function directly — a future script, a rule, a test —
+    # can't materialize an unbounded result set via fetchall().
+    limit = max(1, min(limit, 100_000))
+    offset = max(0, min(offset, 10_000_000))
+
     select, join = _client_join_sql()
     status_case = _status_case()
     where_sql, params = _build_where(client, domain, status, since, until)
@@ -248,6 +268,7 @@ def tail_queries(since: float, since_id: int, limit: int = 500) -> list[dict]:
     double-delivered across polls, even with a rapid burst of same-timestamp
     inserts.
     """
+    limit = max(1, min(limit, 2000))  # bounded here too — see list_queries()
     select, join = _client_join_sql()
     status_case = _status_case()
     sql = f"""
@@ -750,10 +771,24 @@ def simulate_pattern(pattern: str, since: int) -> dict:
     pattern matching 44k rows). GROUP BY costs the SAME two REGEXP-evaluating
     table scans the capped version did — just aggregated in SQL and correct.
     """
-    compiled = re.compile(pattern)
+    re.compile(pattern)  # validate syntax first; raises re.error on bad input
+    # Matched with the third-party `regex` engine (not stdlib `re`) so each
+    # per-row match can be time-bounded below. Client names/hostnames come
+    # from Pi-hole/DHCP and domains logged here are attacker-influenceable
+    # within DNS label limits, so a user-supplied pattern combined with an
+    # adversarial domain string can otherwise trigger catastrophic
+    # backtracking and hang a worker (ReDoS — see SECURITY_AUDIT_REPORT.md
+    # finding #4). A timed-out row is treated as "no match" rather than
+    # raising: conservative (only undercounts that one pathological row)
+    # and never lets a single row stall the whole scan.
+    timed = _timed_regex.compile(pattern)
+    _MATCH_TIMEOUT_SECONDS = 0.5
 
     def _regexp(_pattern_arg: str, value: str | None) -> int:
-        return 1 if compiled.search(value or "") else 0
+        try:
+            return 1 if timed.search(value or "", timeout=_MATCH_TIMEOUT_SECONDS) else 0
+        except TimeoutError:
+            return 0
 
     select, join = _client_join_sql()
     where_sql = "q.timestamp >= ? AND q.domain REGEXP ?"
