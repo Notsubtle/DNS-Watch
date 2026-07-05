@@ -23,6 +23,7 @@ import DrilldownModal from "./components/DrilldownModal";
 import ClientDetailModal from "./components/ClientDetailModal";
 import AlertsPanel from "./components/AlertsPanel";
 import AnomaliesPanel from "./components/AnomaliesPanel";
+import AnomalyDetailDrawer from "./components/AnomalyDetailDrawer";
 import RulesModal from "./components/RulesModal";
 import SettingsModal from "./components/SettingsModal";
 import TabNav, { View } from "./components/TabNav";
@@ -77,9 +78,28 @@ export default function App() {
   const [anomalies, setAnomalies] = useState<Anomaly[]>([]);
   const [drilldown, setDrilldown] = useState<string | null>(null);
   const [clientDetail, setClientDetail] = useState<string | null>(null);
+  const [anomalyDetail, setAnomalyDetail] = useState<Anomaly | null>(null);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const sideColRef = useRef<HTMLDivElement>(null);
+  const [sideColHeight, setSideColHeight] = useState<number>();
+
+  // Live Query Log should stand exactly as tall as the stacked Top
+  // Domains/Top Clients/Query Types column, never taller — so it scrolls
+  // internally instead of pushing the page. Grid alone can't express "match
+  // this sibling's natural height" when the other column's own content is
+  // larger, so we measure it and apply it as an explicit row height.
+  useEffect(() => {
+    const el = sideColRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver((entries) => {
+      const height = entries[0]?.contentRect.height;
+      if (height) setSideColHeight(height);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   // Any filter change resets paging back to the first page — the old offset
   // rarely makes sense against a different result set.
@@ -146,6 +166,13 @@ export default function App() {
   // machinery — same as ClientList's/TopList's click-through.
   function handleAnomalySelect(a: Anomaly) {
     setFilters({ ...filters, client: a.ip, range: nearestPresetForAnomaly(a) });
+  }
+
+  // Clicking the IP text specifically opens the side drawer with the raw
+  // query events behind the anomaly, distinct from the row-click filter
+  // behavior above.
+  function handleAnomalyIpSelect(a: Anomaly) {
+    setAnomalyDetail(a);
   }
 
   // Re-evaluate alerts on demand (after a rule is added/toggled/removed).
@@ -220,13 +247,20 @@ export default function App() {
 
           <SummaryCards summary={summary} />
 
-          <AnomaliesPanel anomalies={anomalies} onSelect={handleAnomalySelect} />
+          <AnomaliesPanel
+            anomalies={anomalies}
+            onSelect={handleAnomalySelect}
+            onSelectIp={handleAnomalyIpSelect}
+          />
 
           <AlertsPanel events={alertEvents} onManageRules={() => setRulesOpen(true)} />
 
           <TimeSeriesChart data={series} loading={loading} />
 
-          <div className="main-grid">
+          <div
+            className="main-grid"
+            style={sideColHeight ? { height: `${sideColHeight}px` } : undefined}
+          >
             <QueryTable
               rows={rows}
               total={total}
@@ -236,7 +270,7 @@ export default function App() {
               onPrev={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
               onNext={() => setOffset((o) => o + PAGE_SIZE)}
             />
-            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div ref={sideColRef} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               <TopList title="Top domains" entries={topDomains} onSelect={setDrilldown} />
               <ClientList clients={topClients} onSelect={setClientDetail} />
               <QueryTypeBreakdown entries={queryTypes} />
@@ -270,6 +304,8 @@ export default function App() {
       {view === "heatmap" && <ClientHeatmapTab clients={clients} />}
 
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+
+      <AnomalyDetailDrawer anomaly={anomalyDetail} onClose={() => setAnomalyDetail(null)} />
     </div>
   );
 }

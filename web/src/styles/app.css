@@ -96,7 +96,7 @@ body {
   background: #05070a;
   border: 1px solid var(--ink-border);
   border-radius: var(--radius);
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .stream-row {
@@ -388,6 +388,7 @@ body {
   display: grid;
   grid-template-columns: 2fr 1fr;
   gap: 16px;
+  align-items: stretch;
 }
 
 .panel {
@@ -395,6 +396,22 @@ body {
   border: 1px solid var(--ink-border);
   border-radius: var(--radius);
   padding: 14px;
+}
+
+.query-table-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.query-table-wrap {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  border: 1px solid var(--ink-border);
+  border-radius: 6px;
+  margin: 10px 0;
 }
 
 .panel h2 {
@@ -476,6 +493,8 @@ table {
 }
 
 th {
+  position: sticky;
+  top: 0;
   text-align: left;
   color: var(--ink-faint);
   font-weight: 500;
@@ -483,6 +502,7 @@ th {
   text-transform: uppercase;
   padding: 6px 8px;
   border-bottom: 1px solid var(--ink-border);
+  background: var(--ink-surf);
 }
 
 td {
@@ -902,6 +922,117 @@ tr:hover td {
 
 .anomaly-item { cursor: pointer; }
 .anomaly-item:hover { filter: brightness(1.3); }
+
+.anomaly-ip-link {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.anomaly-ip-link:hover {
+  color: var(--ink-blue);
+}
+
+/* Anomaly detail side drawer — deliberately not a dimming .modal-overlay:
+   the dashboard behind it stays visible/interactive while it's open. */
+.drawer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+}
+
+.drawer-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 420px;
+  max-width: 92vw;
+  background: var(--ink-surf);
+  border-left: 1px solid var(--ink-border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+  padding: 18px;
+  overflow-y: auto;
+  transform: translateX(100%);
+  transition: transform 0.22s ease;
+  pointer-events: auto;
+}
+
+.drawer-open .drawer-panel {
+  transform: translateX(0);
+}
+
+.drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.drawer-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer-kind {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  margin-bottom: 12px;
+}
+
+.drawer-kind.warning {
+  background: var(--ink-amber-bg);
+  color: var(--ink-amber);
+}
+
+.drawer-kind.critical {
+  background: var(--ink-red-bg);
+  color: var(--ink-red);
+}
+
+.drawer-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.drawer-stat-label {
+  display: block;
+  color: var(--ink-faint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.drawer-stat-value {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  margin-top: 2px;
+}
+
+.drawer-window {
+  color: var(--ink-muted);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
 
 .alert-msg {
   overflow: hidden;

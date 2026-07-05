@@ -66,7 +66,6 @@ export default function LiveStreamTab() {
   const [highlightRules, setHighlightRules] = useState<HighlightRule[]>(() => loadHighlightRules());
   const [highlightModalOpen, setHighlightModalOpen] = useState(false);
   const cursorRef = useRef({ since: Date.now() / 1000, sinceId: 0 });
-  const autoScrollRef = useRef(true);
   const listRef = useListRef(null);
 
   // Recompiled only when the rule set changes, not per row/poll.
@@ -98,8 +97,8 @@ export default function LiveStreamTab() {
             const toRender = isFlood ? batch.slice(-FLOOD_DISPLAY_SAMPLE) : batch;
             const incomingIds = new Set(toRender.map((r) => r.id));
             setRows((prev) => {
-              const merged = [...prev, ...toRender];
-              return merged.length > BUFFER_CAP ? merged.slice(merged.length - BUFFER_CAP) : merged;
+              const merged = [...toRender, ...prev];
+              return merged.length > BUFFER_CAP ? merged.slice(0, BUFFER_CAP) : merged;
             });
             setNewIds(incomingIds);
             setTimeout(() => {
@@ -126,18 +125,6 @@ export default function LiveStreamTab() {
     };
   }, []);
 
-  // Auto-scroll to the newest row, but only if the user was already at (or
-  // near) the bottom — don't yank their view away while they're reading
-  // something further up.
-  useEffect(() => {
-    if (autoScrollRef.current && rows.length > 0) {
-      listRef.current?.scrollToRow({ index: rows.length - 1, align: "end", behavior: "auto" });
-    }
-  }, [rows.length, listRef]);
-
-  function handleRowsRendered(visible: { startIndex: number; stopIndex: number }) {
-    autoScrollRef.current = visible.stopIndex >= rows.length - 2;
-  }
 
   return (
     <div className="stream-console">
@@ -166,7 +153,6 @@ export default function LiveStreamTab() {
             rowCount={rows.length}
             rowHeight={ROW_HEIGHT}
             rowProps={{ rows, newIds, compiledRules }}
-            onRowsRendered={handleRowsRendered}
             style={{ height: "100%" }}
           />
         )}

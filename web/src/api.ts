@@ -243,6 +243,14 @@ export const api = {
 
   anomalies: () => getJson<Anomaly[]>("/api/anomalies"),
 
+  // Underlying query events behind a single anomaly: this client, scoped to
+  // the exact baseline-deviation window the anomaly was computed over.
+  // Reuses /api/queries — `since`/`until` bypass the `range` preset entirely.
+  anomalyQueries: (ip: string, since: number, until: number, limit = 200) =>
+    getJson<QueriesResponse>(
+      `/api/queries${qs({ client: ip, since, until, limit })}`
+    ),
+
   tail: (since: number, sinceId: number, limit = 500) =>
     getJson<TailRow[]>(`/api/tail${qs({ since, since_id: sinceId, limit })}`),
 

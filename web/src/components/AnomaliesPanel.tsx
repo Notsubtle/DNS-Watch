@@ -15,12 +15,13 @@ function describe(a: Anomaly): string {
 interface Props {
   anomalies: Anomaly[];
   onSelect: (a: Anomaly) => void;
+  onSelectIp: (a: Anomaly) => void;
 }
 
 // Same visual pattern as AlertsPanel — reuses its CSS classes directly, since
 // the "scannable colored-dot list" look is identical, just a different data
 // source and meaning (automatic baseline deviation vs. user-configured rules).
-export default function AnomaliesPanel({ anomalies, onSelect }: Props) {
+export default function AnomaliesPanel({ anomalies, onSelect, onSelectIp }: Props) {
   return (
     <div className="panel alerts-panel">
       <div className="panel-head">
@@ -46,7 +47,17 @@ export default function AnomaliesPanel({ anomalies, onSelect }: Props) {
             >
               <span className={`alert-dot ${a.kind === "silent" ? "warning" : "critical"}`} />
               <span className="alert-msg">{describe(a)}</span>
-              <span className="alert-meta">{a.ip}</span>
+              <button
+                type="button"
+                className="alert-meta anomaly-ip-link"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSelectIp(a);
+                }}
+                title="View underlying query activity"
+              >
+                {a.ip}
+              </button>
             </li>
           ))}
         </ul>

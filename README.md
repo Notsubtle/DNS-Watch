@@ -166,7 +166,8 @@ The app is organised into tabs: a **Dashboard** (everything below down to
 "Analysis tabs" further down.
 
 - **Live query table** — every DNS query, auto-refreshing, with client, domain,
-  status (allowed/blocked), and timestamp.
+  status (allowed/blocked), and timestamp. Scrolls internally within a fixed-height
+  panel (newest first) instead of growing the page.
 - **Filters** — by client (dropdown of known devices), domain (substring search),
   status (allowed / blocked / all), and time range (15m / 1h / 24h / 7d / custom).
 - **Summary cards** — total queries, blocked %, unique clients, unique domains for
@@ -213,8 +214,10 @@ The app is organised into tabs: a **Dashboard** (everything below down to
 - **Automatic anomaly detection** — a **Network Anomalies** panel flags clients that
   have gone unexpectedly **silent** or are **spiking**, judged against each client's
   *own* rolling 7-day hourly baseline (fixed thresholds, always on — distinct from the
-  configurable Alert rules above, and needing no setup). Click one to jump the
-  dashboard to the window it fired in.
+  configurable Alert rules above, and needing no setup). Click a row to jump the
+  dashboard to the window it fired in, or click the **IP address** itself to open a
+  side-panel drill-down showing the anomaly's baseline vs. current values and the
+  actual DNS queries behind it.
 - **Optional login** — set `DNSWATCH_AUTH_PASSWORD` (or `DNSWATCH_AUTH_PASSWORD_FILE`
   to read it from a mounted file/Docker secret instead — see `.env.example`) to gate
   the whole app behind HTTP Basic auth. Left unset, it's open on your LAN as before.
@@ -230,9 +233,9 @@ The app is organised into tabs: a **Dashboard** (everything below down to
 
 Beyond the dashboard, three purpose-built views for digging into a specific question:
 
-- **Live Stream ("tail -f")** — a real-time console where new queries stream in as
-  they land (short-interval polling), for watching exactly what a device does the
-  moment you interact with it. Define your own **highlight rules** (glob patterns like
+- **Live Stream ("tail -f")** — a real-time console where new queries stream in at
+  the top as they land (short-interval polling), for watching exactly what a device
+  does the moment you interact with it. Define your own **highlight rules** (glob patterns like
   `*netflix*` → a colour) to make the traffic you care about pop, and the console
   throttles itself gracefully under a flood so a chatty device can't lock up the tab.
   (How "live" it can be is ultimately bounded by Pi-hole FTL's own on-disk flush

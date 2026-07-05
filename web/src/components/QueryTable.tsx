@@ -22,7 +22,7 @@ export default function QueryTable({ rows, total, offset, pageSize, loading, onP
   const hasNext = offset + pageSize < total;
 
   return (
-    <div className="panel">
+    <div className="panel query-table-panel">
       <div className="panel-head">
         <h2>
           Live query log
@@ -32,37 +32,39 @@ export default function QueryTable({ rows, total, offset, pageSize, loading, onP
           {total > 0 ? `${start.toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()}` : "0 results"}
         </span>
       </div>
-      <table>
-        <thead>
-          <tr>
-            <th>Time</th>
-            <th>Client</th>
-            <th>Domain</th>
-            <th>Type</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={`${r.timestamp}-${r.domain}-${i}`}>
-              <td>{formatTime(r.timestamp)}</td>
-              <td title={r.client_ip}>{r.client_name}</td>
-              <td title={r.domain}>{r.domain}</td>
-              <td>{r.query_type}</td>
-              <td>
-                <span className={`status-pill ${r.status}`}>{r.status}</span>
-              </td>
-            </tr>
-          ))}
-          {rows.length === 0 && (
+      <div className="query-table-wrap">
+        <table>
+          <thead>
             <tr>
-              <td colSpan={5} style={{ color: "var(--ink-faint)", fontFamily: "var(--font-sans)" }}>
-                No queries match the current filters.
-              </td>
+              <th>Time</th>
+              <th>Client</th>
+              <th>Domain</th>
+              <th>Type</th>
+              <th>Status</th>
             </tr>
-          )}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={`${r.timestamp}-${r.domain}-${i}`}>
+                <td>{formatTime(r.timestamp)}</td>
+                <td title={r.client_ip}>{r.client_name}</td>
+                <td title={r.domain}>{r.domain}</td>
+                <td>{r.query_type}</td>
+                <td>
+                  <span className={`status-pill ${r.status}`}>{r.status}</span>
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={5} style={{ color: "var(--ink-faint)", fontFamily: "var(--font-sans)" }}>
+                  No queries match the current filters.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
       {total > pageSize && (
         <div className="pager">
           <button onClick={onPrev} disabled={!hasPrev || loading}>
