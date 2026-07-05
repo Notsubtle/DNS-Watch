@@ -24,7 +24,14 @@ COPY --from=web-build /web/dist ./app/static
 RUN useradd -r -u 1000 appuser \
     && mkdir -p /data \
     && chown -R appuser:appuser /srv /data
-USER appuser
+COPY server/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Stays root here deliberately — the entrypoint fixes up /data's ownership
+# (needed on upgrade: a dnswatch-data volume created by an older, root-run
+# image would otherwise be unwritable by appuser) and then drops to appuser
+# itself before exec'ing the real command.
+ENTRYPOINT ["docker-entrypoint.sh"]
 
 EXPOSE 8090
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090"]

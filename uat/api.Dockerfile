@@ -15,7 +15,12 @@ RUN pip install --no-cache-dir . --break-system-packages
 # Non-root, matching server/Dockerfile — UID 1000 also matches the host user
 # whose files get bind-mounted here in the UAT compose file.
 RUN useradd -r -u 1000 appuser && mkdir -p /data && chown -R appuser:appuser /srv /data
-USER appuser
+COPY server/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Stays root here deliberately — see server/Dockerfile for why (the
+# entrypoint fixes up /data's ownership before dropping to appuser).
+ENTRYPOINT ["docker-entrypoint.sh"]
 
 # app/ is bind-mounted at runtime; --reload-dir watches those live files.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090", \
