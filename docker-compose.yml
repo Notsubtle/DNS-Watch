@@ -19,6 +19,13 @@ services:
       # HTTP Basic auth for the whole app. Username defaults to "admin".
       DNSWATCH_AUTH_USERNAME: ${DNSWATCH_AUTH_USERNAME:-admin}
       DNSWATCH_AUTH_PASSWORD: ${DNSWATCH_AUTH_PASSWORD:-}
+      # Alternative to DNSWATCH_AUTH_PASSWORD above: point this at a mounted
+      # file (e.g. a Docker secret) instead of putting the password in plain
+      # env — env vars are visible via `docker inspect`/`/proc/<pid>/environ`
+      # to anyone with host/container access. Takes precedence when set and
+      # readable; falls back to DNSWATCH_AUTH_PASSWORD otherwise. Unset by
+      # default — most single-user LAN setups don't need this.
+      DNSWATCH_AUTH_PASSWORD_FILE: ${DNSWATCH_AUTH_PASSWORD_FILE:-}
     volumes:
       # Read-only mount of Pi-hole's data folder. ':ro' is critical — this
       # process must never be able to write to Pi-hole's database.

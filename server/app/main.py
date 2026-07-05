@@ -9,6 +9,7 @@ import re
 import threading
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfoNotFoundError
 
 from fastapi import FastAPI, HTTPException, Query
@@ -64,8 +65,24 @@ app.add_middleware(
 # route requires the credential except the health check (for container/monitor
 # probes) and CORS preflight. Basic auth is cleartext-over-HTTP — put DNS Watch
 # behind a TLS reverse proxy if it's reachable beyond a trusted LAN.
+def _read_auth_password() -> str:
+    """Prefer a password read from a file (e.g. a mounted Docker secret) over
+    the plain DNSWATCH_AUTH_PASSWORD env var, so operators who want the
+    credential off the process environment/`docker inspect` output have that
+    option. Falls back to the env var when the file isn't configured or
+    can't be read, so existing setups keep working unchanged."""
+    password_file = os.environ.get("DNSWATCH_AUTH_PASSWORD_FILE")
+    if password_file:
+        try:
+            with open(password_file, encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            pass
+    return os.environ.get("DNSWATCH_AUTH_PASSWORD", "")
+
+
 AUTH_USERNAME = os.environ.get("DNSWATCH_AUTH_USERNAME", "admin")
-AUTH_PASSWORD = os.environ.get("DNSWATCH_AUTH_PASSWORD", "")
+AUTH_PASSWORD = _read_auth_password()
 
 
 @app.middleware("http")
@@ -86,6 +103,32 @@ async def basic_auth(request, call_next):
         status_code=401,
         headers={"WWW-Authenticate": 'Basic realm="DNS Watch"'},
     )
+
+
+_STATE_CHANGING_METHODS = {"POST", "PATCH", "DELETE"}
+
+
+@app.middleware("http")
+async def csrf_guard(request, call_next):
+    """Reject cross-origin state-changing requests.
+
+    HTTP Basic auth (when enabled) has no CSRF protection of its own — a
+    browser attaches cached credentials to ANY request sent to this origin,
+    including ones triggered by a page the victim merely visits. There's no
+    session/cookie model here to hang a token off of, so the minimal fix is
+    an Origin/Referer check: if the browser tells us where the request came
+    from and it doesn't match this origin, refuse it. Requests with neither
+    header (curl, server-to-server calls) are let through unchanged — this
+    closes the browser-driven CSRF path, not a hardened defense against a
+    client that can forge headers outright.
+    """
+    if request.method in _STATE_CHANGING_METHODS:
+        source = request.headers.get("origin") or request.headers.get("referer")
+        if source:
+            source_host = urlparse(source).netloc
+            if source_host and source_host != request.headers.get("host", ""):
+                return Response(status_code=403, content="cross-origin request rejected")
+    return await call_next(request)
 
 
 def _since_from_range(range_param: str | None, since_param: int | None) -> int | None:
