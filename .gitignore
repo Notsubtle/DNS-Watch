@@ -11,5 +11,9 @@ tsconfig.tsbuildinfo
 # UAT: snapshot of the real Pi-hole DB (contains real DNS history — never commit)
 uat/pihole-data/
 
+# Perf harness output: large synthetic benchmark DBs (regenerated on demand)
+*.sqlite
+server/tests/perf/__pycache__/
+
 # Local Claude Code settings (machine-specific)
 .claude/settings.local.json
