@@ -28,6 +28,24 @@ def test_silent_device_flagged(ftl):
     assert hit["baseline_avg"] > 10
 
 
+def test_silent_device_gets_presence_note(ftl):
+    """#6/#7: a silent anomaly carries the same presence qualifier a
+    device_quiet alert rule would attach — "may be offline/switched resolver"
+    when a real MAC is known (only possible on schemas with a `network` table
+    that has hwaddr/macVendor: "real"/"idstore" — see #4), "presence cannot be
+    determined" otherwise."""
+    from app import db
+    now = int(time.time())
+    pattern = [15] * 27 + [0, 0, 0]
+    add_client_with_hourly_pattern(ftl["path"], ftl["schema"], "10.0.0.52", "silent_device2", pattern, now)
+
+    hit = next(a for a in db.detect_anomalies() if a["ip"] == "10.0.0.52")
+    if ftl["schema"] in ("real", "idstore"):
+        assert hit["presence_note"] == db.PRESENCE_MAC_KNOWN_NOTE
+    else:
+        assert hit["presence_note"] == db.PRESENCE_MAC_UNKNOWN_NOTE
+
+
 def test_two_of_three_silent_hours_not_flagged(ftl):
     from app import db
     now = int(time.time())

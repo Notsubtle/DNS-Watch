@@ -106,6 +106,8 @@ export default function AnomalyDetailDrawer({ anomaly, onClose }: Props) {
             {fmtDateTime(a.window_since)} – {fmtDateTime(a.window_until)}
           </div>
 
+          {a.presence_note && <div className="drawer-window">{a.presence_note}</div>}
+
           <h3 className="modal-section">Query activity in this window</h3>
 
           {loading && <div className="chart-empty">Loading…</div>}

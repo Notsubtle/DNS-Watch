@@ -54,7 +54,19 @@ so it *tells you* about things instead of only showing them when you happen to l
 **Honest scope:** DNS Watch *observes* — it doesn't block (Pi-hole does that) and it
 isn't a full intrusion-detection system. It only sees DNS *names* that actually pass
 through Pi-hole, so a device using DoH (DNS-over-HTTPS), a hardcoded resolver, or a
-VPN bypasses Pi-hole and won't show up here.
+VPN bypasses Pi-hole and won't show up here. This is also why DNS Watch doesn't try
+to *actively probe* whether a quiet device is still online: its container has no
+visibility into your LAN beyond what Pi-hole's own database already recorded (no
+host networking, no raw-socket capabilities), so any "is it really offline?" check
+of its own would be guesswork dressed up as a fact. Instead, when a device goes
+quiet — via an Alert rule or the automatic Anomalies panel — the qualifier attached
+tells you exactly what DNS Watch does and doesn't know: if it has ever seen a real
+MAC address for that client, the note reads "may be offline, or may have switched to
+a different DNS resolver (DoH, VPN, hardcoded upstream)"; if Pi-hole never captured
+one (a value Pi-hole itself represents as an `ip-<address>` placeholder — common for
+cross-subnet/VLAN traffic, an expired DHCP lease record, or a gap after a Pi-hole
+restart), the note says presence simply can't be determined, rather than guessing
+either way.
 
 ## Why DNS Watch, when Pi-hole already has a dashboard?
 
@@ -211,6 +223,16 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   fact.
 - **Client naming** — pulls names Pi-hole already knows (from DHCP lease / your
   manual naming in Pi-hole's own UI); no separate naming step needed.
+- **Vendor identification** — the client detail view shows a device's manufacturer
+  when it can be determined: first from Pi-hole's own MAC-vendor lookup, and, when
+  that's empty, from a bundled offline IEEE OUI table (regenerated via
+  `server/scripts/build_oui_table.py`, MA-L registry only — the narrower MA-M/MA-S
+  sub-prefixes aren't covered, a deliberate v1 tradeoff to avoid misattributing
+  vendors without proper longest-prefix matching). A device can't be identified this
+  way — and DNS Watch says so explicitly rather than guessing — for two different
+  reasons: Pi-hole never captured a real MAC address for it at all, or it's using a
+  randomized/locally-administered MAC (a privacy feature on most modern mobile OSes),
+  which has no vendor in any registry by design.
 - **Automatic anomaly detection** — a **Network Anomalies** panel flags clients that
   have gone unexpectedly **silent** or are **spiking**, judged against each client's
   *own* rolling 7-day hourly baseline (fixed thresholds, always on — distinct from the

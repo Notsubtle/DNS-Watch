@@ -58,6 +58,27 @@ def test_client_detail_endpoint(client):
     assert len(d["top_domains"]) > 0
 
 
+def test_client_detail_vendor_fields(client, ftl):
+    """Vendor enrichment (#4): present for schemas with a network table
+    carrying hwaddr/macVendor ("real", "idstore"); gracefully absent
+    (mac_known False, vendor None) for schemas that have none ("new", "old")."""
+    d = client.get("/api/client/192.168.1.10?range=all").json()
+    assert {"hwaddr", "mac_known", "vendor", "vendor_unknown_reason"} <= set(d)
+    if ftl["schema"] in ("real", "idstore"):
+        assert d["mac_known"] is True
+        assert d["hwaddr"] and d["hwaddr"].count(":") == 5
+        assert d["vendor"] == "TestVendor"
+    else:
+        assert d["mac_known"] is False
+        assert d["hwaddr"] is None
+        assert d["vendor"] is None
+
+    clients = client.get("/api/clients").json()
+    row = next(c for c in clients if c["ip"] == "192.168.1.10")
+    assert row["mac_known"] == d["mac_known"]
+    assert row["vendor"] == d["vendor"]
+
+
 def test_csv_export(client):
     r = client.get("/api/queries.csv?range=all&limit=1000")
     assert r.status_code == 200

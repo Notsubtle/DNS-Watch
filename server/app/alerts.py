@@ -499,9 +499,13 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
         prior = db.client_counts(now - 2 * window_min * 60, now - window_min * 60)
         for c in prior:
             if c["count"] >= min_prior and recent.get(c["ip"], 0) == 0:
+                # Shared with detect_anomalies()'s "silent" case (#6/#7) so the
+                # Alerts and Anomalies panels never disagree about the same
+                # client going quiet.
+                note = db.quiet_presence_note(c["ip"])
                 _emit(pending, rule, "warning",
                       f"{c['name']} went quiet — {c['count']} queries in the prior "
-                      f"{window_min}m, none since",
+                      f"{window_min}m, none since ({note})",
                       f"quiet:{rule['id']}:{c['ip']}")
 
 

@@ -133,6 +133,16 @@ export interface ClientDetail {
   top_domains: TopEntry[];
   query_types: QueryTypeEntry[];
   timeseries: Timeseries;
+  // Vendor enrichment (#4/#5). hwaddr/vendor are null and mac_known is false
+  // when DNS Watch never observed a real MAC for this client (Pi-hole's own
+  // "ip-<addr>" placeholder, or no `network` table data at all). When
+  // mac_known is true but vendor is null, vendor_unknown_reason explains why:
+  // "randomized" (locally-administered/private MAC, no vendor by design) or
+  // "unlisted" (real MAC, genuinely not in our offline OUI table).
+  hwaddr: string | null;
+  mac_known: boolean;
+  vendor: string | null;
+  vendor_unknown_reason: "randomized" | "unlisted" | null;
 }
 
 export interface Anomaly {
@@ -144,6 +154,10 @@ export interface Anomaly {
   current_value: number;
   window_since: number;
   window_until: number;
+  // Only set for kind "silent" (#6/#7) — the same presence qualifier a
+  // device_quiet alert rule would attach for this client, so the Alerts and
+  // Anomalies panels never disagree about the same client going quiet.
+  presence_note?: string;
 }
 
 export type WebhookFormat = "generic" | "slack" | "discord";

@@ -25,5 +25,11 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["app*"]
 
+[tool.setuptools.package-data]
+# Bundled offline OUI (MAC vendor) lookup table — see app/oui.py and
+# scripts/build_oui_table.py. Must be declared explicitly or setuptools
+# won't include this non-.py data file in the installed package.
+app = ["data/*.gz"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
