@@ -336,6 +336,23 @@ def store(tmp_path, monkeypatch):
     return path
 
 
+@pytest.fixture(autouse=True)
+def _isolate_rollup_store(tmp_path, monkeypatch):
+    """rollups.py shares its physical db file with alerts.py's store in
+    production (see rollups.py's module docstring), but plenty of test files
+    predate rollups.py and only ever isolate db.DB_PATH (Pi-hole's read-only
+    source), never touching the `store` fixture above. db.py's aggregate
+    functions now dispatch into rollups.py unconditionally for the unbounded
+    "All" case, so ANY test that calls one of them — regardless of which local
+    fixture it uses for the Pi-hole side — would otherwise fall through to
+    rollups.py's real default (/data/dnswatch.db), which doesn't exist and
+    isn't creatable by a non-root test process (this is exactly what broke
+    CI). Autouse + session-independent tmp_path closes this for every test,
+    present and future, rather than patching each fixture individually."""
+    from app import rollups
+    monkeypatch.setattr(rollups, "STORE_PATH", str(tmp_path / "rollups-isolated.db"))
+
+
 @pytest.fixture
 def client(ftl, store):
     from fastapi.testclient import TestClient
