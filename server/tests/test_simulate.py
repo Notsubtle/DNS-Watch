@@ -108,6 +108,16 @@ def test_pathological_pattern_does_not_hang(ftl):
             "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,?)",
             (time.time(), 1, 2, domain, 1),
         )
+    elif ftl["schema"] == "idstore":
+        # `queries` is a VIEW here; write to the underlying query_storage with
+        # resolved integer domain/client ids.
+        from conftest import _idstore_client_id, _idstore_domain_id
+        did = _idstore_domain_id(conn.cursor(), domain)
+        cid = _idstore_client_id(conn.cursor(), "192.168.1.10", "laptop")
+        conn.execute(
+            "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (int(time.time()), 1, 2, did, cid),
+        )
     else:
         conn.execute(
             "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",

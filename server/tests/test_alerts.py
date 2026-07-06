@@ -71,6 +71,13 @@ def test_device_quiet_rule(client, ftl):
         for _ in range(30):
             conn.execute("INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,'192.168.1.98')",
                          (float(now - 90 * 60), 1, 2, "a.example.com"))
+    elif ftl["schema"] == "idstore":
+        from conftest import _idstore_client_id, _idstore_domain_id
+        cid = _idstore_client_id(conn.cursor(), "192.168.1.98", "oldtv")
+        did = _idstore_domain_id(conn.cursor(), "a.example.com")
+        for _ in range(30):
+            conn.execute("INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                         (now - 90 * 60, 1, 2, did, cid))
     else:
         conn.execute("INSERT INTO network VALUES (98,'oldtv')")
         conn.execute("INSERT INTO network_addresses VALUES ('192.168.1.98',98)")
