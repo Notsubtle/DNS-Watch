@@ -62,6 +62,13 @@ class Schema:
     # `network` table has no name column). Older builds we've seen put the name
     # on `network.name`. Detect which so the old-schema join reads the right one.
     na_has_name: bool = False
+    # Newest FTL ("normalized") layout: `queries` is a VIEW over the real
+    # `query_storage` table, and domain/client are stored as integer IDs
+    # resolved through `domain_by_id`/`client_by_id`. When present, aggregate
+    # queries can group/filter on the raw integer IDs directly instead of
+    # paying the view's per-row correlated subquery. Purely additive: older
+    # shapes (no query_storage) leave this False and behave exactly as before.
+    has_id_storage: bool = False
 
 
 def _connect() -> sqlite3.Connection:
@@ -78,7 +85,19 @@ def detect_schema() -> Schema:
         has_client_table = "client_id" in cols
         na_cols = {row["name"] for row in conn.execute("PRAGMA table_info(network_addresses)")}
         na_has_name = "name" in na_cols
-    return Schema(has_client_table=has_client_table, na_has_name=na_has_name)
+        # The normalized fast path requires all three real tables to be present.
+        # (`queries` itself is a VIEW in this layout; we detect the tables it
+        # reads from, not the view.)
+        tables = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        has_id_storage = {"query_storage", "domain_by_id", "client_by_id"}.issubset(tables)
+    return Schema(
+        has_client_table=has_client_table,
+        na_has_name=na_has_name,
+        has_id_storage=has_id_storage,
+    )
 
 
 def _client_join_sql() -> tuple[str, str]:
@@ -183,6 +202,113 @@ def _build_where(
         where.append("q.timestamp <= ?")
         params.append(until)
     status_pred = _status_where(status)
+    if status_pred:
+        where.append(status_pred)
+    return " AND ".join(where), params
+
+
+# --------------------------------------------------------------------------
+# Newer FTL ("normalized") fast path — see Schema.has_id_storage.
+#
+# In this layout `queries` is a VIEW over `query_storage`, and the view
+# resolves the integer domain/client IDs to text with a CORRELATED SUBQUERY
+# PER ROW (verified with EXPLAIN QUERY PLAN against a real snapshot). That is
+# fine for the small, recently-paged reads (list_queries/tail) but is exactly
+# what makes the whole-table AGGREGATES slow: they pay one subquery per
+# scanned row just to build a GROUP BY key. The functions below instead
+# GROUP/FILTER on the raw integer columns of `query_storage` and resolve
+# names only for the handful of rows actually returned.
+#
+# Correctness invariants (each verified against the real UAT snapshot):
+#   * domain_by_id.id is a PK and domain_by_id.domain is UNIQUE, so the
+#     id<->text mapping is a bijection. Grouping by the integer domain id is
+#     therefore identical to grouping by resolved text, including for
+#     COUNT(DISTINCT domain).
+#   * client_by_id is NOT injective on ip: two ids can map to the same ip
+#     (127.0.0.1 appears as id 2 AND id 3 in the real snapshot). The trusted
+#     view groups by *resolved ip*, so every client aggregate here groups by
+#     raw id first and MERGES by resolved ip in Python. Client cardinality is
+#     tiny (LAN devices), so this is cheap and exact.
+#   * client NAME comes from network_addresses.name keyed by ip — the same
+#     source the view-based path uses for this schema — not client_by_id.name.
+# --------------------------------------------------------------------------
+
+
+def _client_ids_for_ip(conn: sqlite3.Connection, ip: str) -> list[int]:
+    """Every client_by_id.id whose ip matches `ip` (usually one, but the ip
+    column is not unique — see module note above)."""
+    return [r["id"] for r in conn.execute("SELECT id FROM client_by_id WHERE ip = ?", [ip])]
+
+
+def _client_ip_map(conn: sqlite3.Connection) -> dict[int, str]:
+    return {r["id"]: r["ip"] for r in conn.execute("SELECT id, ip FROM client_by_id")}
+
+
+def _client_name_map(conn: sqlite3.Connection) -> dict[str, str | None]:
+    """ip -> name, from network_addresses (the same source _client_join_sql's
+    na_has_name branch reads). ips absent here resolve to None, matching the
+    view path's LEFT JOIN."""
+    return {r["ip"]: r["name"] for r in conn.execute("SELECT ip, name FROM network_addresses")}
+
+
+def _resolve_domain_value(did, dmap: dict[int, str]):
+    """Mirror the view's `CASE typeof(domain) WHEN 'integer' THEN <lookup>
+    ELSE domain END`: integer ids resolve through domain_by_id (None if a
+    stored id is orphaned, exactly as the view's subquery yields NULL); a
+    value already stored as text resolves to itself."""
+    if isinstance(did, int):
+        return dmap.get(did)
+    return did
+
+
+def _resolve_client_value(cid, ipmap: dict[int, str]):
+    """Client analogue of _resolve_domain_value (see the view's CASE)."""
+    if isinstance(cid, int):
+        return ipmap.get(cid)
+    return cid
+
+
+def _resolve_domains(conn: sqlite3.Connection, ids: list) -> dict[int, str]:
+    int_ids = [i for i in ids if isinstance(i, int)]
+    if not int_ids:
+        return {}
+    ph = ",".join("?" for _ in int_ids)
+    return {
+        r["id"]: r["domain"]
+        for r in conn.execute(f"SELECT id, domain FROM domain_by_id WHERE id IN ({ph})", int_ids)
+    }
+
+
+def _id_where(
+    client_ids: list[int] | None = None,
+    since: int | None = None,
+    until: int | None = None,
+    status: str | None = None,
+) -> tuple[str, list]:
+    """WHERE builder for the raw `query_storage` table (aliased `q`).
+
+    Mirrors _build_where's semantics for the filters the rewritten aggregates
+    actually use (client, since, until, status). `client_ids` is the set of
+    client_by_id ids for a requested ip (may be several — see module note);
+    an empty list means "ip matched no known client" and yields no rows, the
+    same result the view path gives for `q.client = <unknown ip>`.
+    """
+    where = ["1=1"]
+    params: list = []
+    if client_ids is not None:
+        if not client_ids:
+            where.append("0")  # unknown ip -> match nothing
+        else:
+            ph = ",".join("?" for _ in client_ids)
+            where.append(f"q.client IN ({ph})")
+            params.extend(client_ids)
+    if since:
+        where.append("q.timestamp >= ?")
+        params.append(since)
+    if until:
+        where.append("q.timestamp <= ?")
+        params.append(until)
+    status_pred = _status_where(status)  # builds `q.status IN (...)` from fixed int sets
     if status_pred:
         where.append(status_pred)
     return " AND ".join(where), params
@@ -347,6 +473,8 @@ def summary(client: str | None, since: int | None, until: int | None) -> dict:
 
 
 def top_domains(client: str | None, since: int | None, limit: int = 15) -> list[dict]:
+    if detect_schema().has_id_storage:
+        return _top_domains_id(client, since, limit)
     _, join = _client_join_sql()
     where_sql, params = _build_where(client=client, since=since)
 
@@ -363,6 +491,26 @@ def top_domains(client: str | None, since: int | None, limit: int = 15) -> list[
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
     return [{"domain": r["domain"], "count": r["n"]} for r in rows]
+
+
+def _top_domains_id(client: str | None, since: int | None, limit: int) -> list[dict]:
+    """Fast path: GROUP BY the raw integer domain id on query_storage, then
+    resolve only the top `limit` ids to text. domain_by_id is a bijection so
+    this is identical to the view-based grouping (see module note)."""
+    with _connect() as conn:
+        client_ids = _client_ids_for_ip(conn, client) if client else None
+        where_sql, params = _id_where(client_ids=client_ids, since=since)
+        sql = f"""
+            SELECT q.domain AS did, COUNT(*) AS n
+            FROM query_storage q
+            WHERE {where_sql}
+            GROUP BY q.domain
+            ORDER BY n DESC
+            LIMIT ?
+        """
+        rows = conn.execute(sql, [*params, limit]).fetchall()
+        dmap = _resolve_domains(conn, [r["did"] for r in rows])
+    return [{"domain": _resolve_domain_value(r["did"], dmap), "count": r["n"]} for r in rows]
 
 
 def top_clients(since: int | None, limit: int = 15) -> list[dict]:
