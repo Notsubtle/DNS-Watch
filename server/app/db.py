@@ -244,6 +244,14 @@ def _client_ip_map(conn: sqlite3.Connection) -> dict[int, str]:
     return {r["id"]: r["ip"] for r in conn.execute("SELECT id, ip FROM client_by_id")}
 
 
+def _ids_for_ips(ipmap: dict[int, str], ips) -> list[int]:
+    """All client_by_id ids whose resolved ip is in `ips` (inverse of ipmap).
+    Used to translate a set of resolved ips back to every raw id that maps to
+    them, so a WHERE filter over query_storage covers all of a client's ids."""
+    wanted = set(ips)
+    return [cid for cid, ip in ipmap.items() if ip in wanted]
+
+
 def _client_name_map(conn: sqlite3.Connection) -> dict[str, str | None]:
     """ip -> name, from network_addresses (the same source _client_join_sql's
     na_has_name branch reads). ips absent here resolve to None, matching the
@@ -781,6 +789,8 @@ def client_activity(
     (not just the window), so the frontend can flag genuinely-new devices rather
     than ones that merely happen to be quiet earlier in the range.
     """
+    if detect_schema().has_id_storage:
+        return _client_activity_id(since, until, limit, buckets)
     select, join = _client_join_sql()
     ccol = _client_ip_col()
 
@@ -864,6 +874,101 @@ def client_activity(
             "count": t["n"],
             "first_seen": firsts.get(ip),
             "last_seen": t["last_seen"],
+            "sparkline": [bmap.get(i, 0) for i in range(n_buckets)],
+        })
+    return result
+
+
+def _client_activity_id(
+    since: int | None, until: int | None, limit: int, buckets: int
+) -> list[dict]:
+    """Fast path for client_activity. Same three-step shape as the view path
+    (top-N in window, global first-seen for those, sparkline buckets), but
+    grouped on the raw client id and MERGED by resolved ip at each step, so a
+    client seen under two ids stays a single row with summed counts, min
+    first-seen, max last-seen, and summed sparkline buckets — matching the
+    view's group-by-resolved-ip semantics."""
+    with _connect() as conn:
+        ipmap = _client_ip_map(conn)
+        namemap = _client_name_map(conn)
+
+        win_until = until if until else int(time.time())
+        if since:
+            win_since = since
+        else:
+            base_where, base_params = _id_where(until=until)
+            mn = conn.execute(
+                f"SELECT MIN(q.timestamp) AS mn FROM query_storage q WHERE {base_where}",
+                base_params,
+            ).fetchone()["mn"]
+            win_since = mn if mn is not None else win_until
+
+        span = max(1, win_until - win_since)
+        buckets = max(1, min(buckets, 200))
+        width = max(1, span // buckets)
+        n_buckets = int(span // width) + 1
+
+        where_sql, params = _id_where(since=win_since, until=win_until)
+        # 1) Per-id count/last_seen in the window, merged to per-ip.
+        raw_top = conn.execute(
+            f"""
+            SELECT q.client AS cid, COUNT(*) AS n, MAX(q.timestamp) AS last_seen
+            FROM query_storage q
+            WHERE {where_sql}
+            GROUP BY q.client
+            """,
+            params,
+        ).fetchall()
+        by_ip: dict = {}
+        for r in raw_top:
+            ip = _resolve_client_value(r["cid"], ipmap)
+            if ip in by_ip:
+                by_ip[ip]["n"] += r["n"]
+                by_ip[ip]["last_seen"] = max(by_ip[ip]["last_seen"], r["last_seen"])
+            else:
+                by_ip[ip] = {"n": r["n"], "last_seen": r["last_seen"]}
+        top = sorted(by_ip.items(), key=lambda kv: kv[1]["n"], reverse=True)[:limit]
+        if not top:
+            return []
+
+        top_ips = [ip for ip, _ in top]
+        ids = _ids_for_ips(ipmap, top_ips)
+        placeholders = ",".join("?" for _ in ids)
+
+        # 2) Global (unwindowed) first-seen for the selected clients' ids.
+        firsts: dict = {}
+        for r in conn.execute(
+            f"SELECT q.client AS cid, MIN(q.timestamp) AS fs FROM query_storage q "
+            f"WHERE q.client IN ({placeholders}) GROUP BY q.client",
+            ids,
+        ):
+            ip = _resolve_client_value(r["cid"], ipmap)
+            firsts[ip] = r["fs"] if ip not in firsts else min(firsts[ip], r["fs"])
+
+        # 3) Sparkline buckets, merged per (ip, bucket).
+        spark_by_ip: dict = {}
+        for r in conn.execute(
+            f"""
+            SELECT q.client AS cid, CAST((q.timestamp - ?) / ? AS INTEGER) AS bucket, COUNT(*) AS n
+            FROM query_storage q
+            WHERE {where_sql} AND q.client IN ({placeholders})
+            GROUP BY q.client, bucket
+            """,
+            [win_since, width, *params, *ids],
+        ):
+            ip = _resolve_client_value(r["cid"], ipmap)
+            b = spark_by_ip.setdefault(ip, {})
+            b[r["bucket"]] = b.get(r["bucket"], 0) + r["n"]
+
+    result = []
+    for ip, agg in top:
+        bmap = spark_by_ip.get(ip, {})
+        result.append({
+            "ip": ip,
+            "name": namemap.get(ip) or ip,
+            "count": agg["n"],
+            "first_seen": firsts.get(ip),
+            "last_seen": agg["last_seen"],
             "sparkline": [bmap.get(i, 0) for i in range(n_buckets)],
         })
     return result
@@ -1017,6 +1122,8 @@ def new_clients(after_ts: int) -> list[dict]:
     that genuinely appeared for the first time in the window — the signal the
     new-device alert rule keys on.
     """
+    if detect_schema().has_id_storage:
+        return _new_clients_id(after_ts)
     select, join = _client_join_sql()
     ccol = _client_ip_col()
     sql = f"""
@@ -1038,6 +1145,35 @@ def new_clients(after_ts: int) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def _new_clients_id(after_ts: int) -> list[dict]:
+    """Fast path: MIN(timestamp)/COUNT grouped on the raw client id (no per-row
+    ip subquery), then MERGE by resolved ip before applying the first-seen
+    cutoff. Merging first is required for correctness: a client seen under two
+    ids has one true global first-seen (the min across both) and one total."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT q.client AS cid, MIN(q.timestamp) AS fs, COUNT(*) AS total "
+            "FROM query_storage q GROUP BY q.client"
+        ).fetchall()
+        ipmap = _client_ip_map(conn)
+        namemap = _client_name_map(conn)
+    merged: dict = {}
+    for r in rows:
+        ip = _resolve_client_value(r["cid"], ipmap)
+        if ip in merged:
+            fs, total = merged[ip]
+            merged[ip] = (min(fs, r["fs"]), total + r["total"])
+        else:
+            merged[ip] = (r["fs"], r["total"])
+    out = [
+        {"ip": ip, "name": namemap.get(ip) or ip, "first_seen": fs, "total": total}
+        for ip, (fs, total) in merged.items()
+        if fs >= after_ts
+    ]
+    out.sort(key=lambda c: c["first_seen"], reverse=True)
+    return out
 
 
 TOP_DOMAINS_LIMIT = 50  # how many matched domains the breakdown returns
@@ -1175,6 +1311,99 @@ SPIKE_STDDEV_MULTIPLIER = 3.0
 NEW_DEVICE_GRACE_SECONDS = 24 * 3600
 
 
+def _anomaly_inputs(
+    now: int, baseline_start: int
+) -> tuple[dict[str, dict[int, int]], dict[str, int], dict[str, str]]:
+    """Fetch the (per-client hourly buckets, windowed first-seen, names) that
+    detect_anomalies analyses. Two implementations with identical outputs:
+    the view path (correlated per-row resolution) and the id path (group on
+    raw client id, merge by resolved ip).
+
+    "First-seen" here is deliberately the earliest row WITHIN the baseline
+    window, not the client's true all-time first query (which would cost an
+    extra unwindowed full-table scan, ~0.7s on the real snapshot). It's
+    equivalent for both uses downstream: eligibility (`now - fs < 24h`) — a
+    client active before the window has a windowed fs at/near baseline_start,
+    always >24h old, same conclusion as the true value; and clamping
+    (`max(baseline_start, fs)`) — a client whose true first query is within
+    the window has an unchanged windowed fs, and an older client collapses to
+    ≈baseline_start either way, exactly what the clamp resolves to. (Accepted
+    edge case: a client active long ago, silent >7 days, then active again in
+    the window reads as "new" rather than "returning" — fine, it has no useful
+    recent baseline anyway.)
+    """
+    if not detect_schema().has_id_storage:
+        ccol = _client_ip_col()
+        _, join = _client_join_sql()
+        with _connect() as conn:
+            bucket_rows = conn.execute(
+                f"""
+                SELECT {ccol} AS ip,
+                       CAST((q.timestamp - ?) / 3600 AS INTEGER) AS bucket,
+                       COUNT(*) AS n
+                FROM queries q
+                {join}
+                WHERE q.timestamp >= ? AND q.timestamp <= ?
+                GROUP BY ip, bucket
+                """,
+                [baseline_start, baseline_start, now],
+            ).fetchall()
+            select, _ = _client_join_sql()
+            first_seen_rows = conn.execute(
+                f"""
+                SELECT {select}, MIN(q.timestamp) AS fs
+                FROM queries q
+                {join}
+                WHERE q.timestamp >= ?
+                GROUP BY {ccol}
+                """,
+                [baseline_start],
+            ).fetchall()
+        first_seen = {r["client_ip"]: r["fs"] for r in first_seen_rows}
+        names = {r["client_ip"]: (r["client_name"] or r["client_ip"]) for r in first_seen_rows}
+        per_client_buckets: dict[str, dict[int, int]] = {}
+        for r in bucket_rows:
+            per_client_buckets.setdefault(r["ip"], {})[r["bucket"]] = r["n"]
+        return per_client_buckets, first_seen, names
+
+    # Id fast path: group on the raw client id (no per-row ip subquery) and
+    # merge by resolved ip, so a client seen under two ids sums its buckets,
+    # takes the min first-seen, and appears once — matching the view.
+    with _connect() as conn:
+        ipmap = _client_ip_map(conn)
+        namemap = _client_name_map(conn)
+        bucket_rows = conn.execute(
+            """
+            SELECT q.client AS cid,
+                   CAST((q.timestamp - ?) / 3600 AS INTEGER) AS bucket,
+                   COUNT(*) AS n
+            FROM query_storage q
+            WHERE q.timestamp >= ? AND q.timestamp <= ?
+            GROUP BY q.client, bucket
+            """,
+            [baseline_start, baseline_start, now],
+        ).fetchall()
+        first_seen_rows = conn.execute(
+            "SELECT q.client AS cid, MIN(q.timestamp) AS fs FROM query_storage q "
+            "WHERE q.timestamp >= ? GROUP BY q.client",
+            [baseline_start],
+        ).fetchall()
+
+    per_client_buckets = {}
+    for r in bucket_rows:
+        ip = _resolve_client_value(r["cid"], ipmap)
+        b = per_client_buckets.setdefault(ip, {})
+        b[r["bucket"]] = b.get(r["bucket"], 0) + r["n"]
+
+    first_seen = {}
+    for r in first_seen_rows:
+        ip = _resolve_client_value(r["cid"], ipmap)
+        first_seen[ip] = r["fs"] if ip not in first_seen else min(first_seen[ip], r["fs"])
+
+    names = {ip: (namemap.get(ip) or ip) for ip in first_seen}
+    return per_client_buckets, first_seen, names
+
+
 def detect_anomalies() -> list[dict]:
     """Flag clients whose recent query volume deviates from their own 7-day
     hourly baseline: gone silent, or spiking. Fixed thresholds (module
@@ -1196,63 +1425,7 @@ def detect_anomalies() -> list[dict]:
     recent_start_bucket = (baseline_end - baseline_start) // 3600
     total_hours = recent_start_bucket + SILENT_WINDOW_HOURS
 
-    ccol = _client_ip_col()
-    _, join = _client_join_sql()
-    # `join` is a single JOIN against the small client-identity table (once,
-    # as part of this one query's plan) — not the same cost as the per-client
-    # WHERE-filtered scans this replaced. Still one pass over the
-    # timestamp-indexed range regardless of client count.
-
-    with _connect() as conn:
-        bucket_rows = conn.execute(
-            f"""
-            SELECT {ccol} AS ip,
-                   CAST((q.timestamp - ?) / 3600 AS INTEGER) AS bucket,
-                   COUNT(*) AS n
-            FROM queries q
-            {join}
-            WHERE q.timestamp >= ? AND q.timestamp <= ?
-            GROUP BY ip, bucket
-            """,
-            [baseline_start, baseline_start, now],
-        ).fetchall()
-        # "First-seen" here deliberately means "earliest row within the
-        # baseline window", NOT the client's true all-time first query — an
-        # unwindowed full-table scan measured ~0.7s on its own against the
-        # real Cube1 snapshot, and it turns out to be unnecessary: every use
-        # below only ever compares this value against baseline_start/now, and
-        # for both uses, a windowed earliest-row is functionally equivalent
-        # to the true value clamped at baseline_start:
-        #   - eligibility (`now - fs < 24h`) — a client active before the
-        #     window has a windowed `fs` at/near baseline_start, which is
-        #     always > 24h old, same conclusion as the true value.
-        #   - clamping (`max(baseline_start, fs)`) — a client whose true
-        #     first-ever query is within the window has a windowed `fs`
-        #     equal to the true value (nothing before it was excluded); a
-        #     client older than the window collapses to ≈baseline_start
-        #     either way, which is exactly what the clamp resolves to anyway.
-        # (One accepted edge case: a client active long ago, then fully
-        # silent for over 7 days, then newly active again within the window
-        # reads as "new" here instead of "returning" — reasonable, since it
-        # has no useful recent baseline to compare against either way.)
-        select, _ = _client_join_sql()
-        first_seen_rows = conn.execute(
-            f"""
-            SELECT {select}, MIN(q.timestamp) AS fs
-            FROM queries q
-            {join}
-            WHERE q.timestamp >= ?
-            GROUP BY {ccol}
-            """,
-            [baseline_start],
-        ).fetchall()
-
-    first_seen = {r["client_ip"]: r["fs"] for r in first_seen_rows}
-    names = {r["client_ip"]: (r["client_name"] or r["client_ip"]) for r in first_seen_rows}
-
-    per_client_buckets: dict[str, dict[int, int]] = {}
-    for r in bucket_rows:
-        per_client_buckets.setdefault(r["ip"], {})[r["bucket"]] = r["n"]
+    per_client_buckets, first_seen, names = _anomaly_inputs(now, baseline_start)
 
     anomalies: list[dict] = []
     for ip, buckets in per_client_buckets.items():

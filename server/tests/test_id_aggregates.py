@@ -170,3 +170,93 @@ def test_summary_matches(idb, monkeypatch):
     v2, i2 = _both(monkeypatch, lambda: db.summary(_DUP_IP, None, None))
     assert v2 == i2
     assert i2["unique_clients"] == 1
+
+
+def test_client_activity_matches(idb, monkeypatch):
+    # Pin `until` (client_activity re-reads time.time() when until is None,
+    # which would differ between the two sequential calls).
+    def call():
+        return db.client_activity(None, 1_700_000_100, limit=100, buckets=20)
+
+    view, idp = _both(monkeypatch, call)
+    # Compare order-independently by ip; every field must match, including the
+    # merged duplicate-ip client's summed count/sparkline.
+    vm = {c["ip"]: c for c in view}
+    im = {c["ip"]: c for c in idp}
+    assert vm.keys() == im.keys()
+    for ip in vm:
+        assert vm[ip] == im[ip]
+    assert _DUP_IP in im
+
+
+def test_new_clients_matches(idb, monkeypatch):
+    # A cutoff old enough to catch every client on this 10-day dataset.
+    cutoff = 1_700_000_000 - 20 * 86400
+    view, idp = _both(monkeypatch, lambda: db.new_clients(cutoff))
+    vm = {c["ip"]: (c["first_seen"], c["total"], c["name"]) for c in view}
+    im = {c["ip"]: (c["first_seen"], c["total"], c["name"]) for c in idp}
+    assert vm == im
+    # first_seen ordering (desc) agrees where values are distinct.
+    assert [c["first_seen"] for c in view] == [c["first_seen"] for c in idp]
+
+
+_ANOMALY_NOW = 1_800_000_000  # fixed clock so the test never depends on wall time
+
+
+def _build_anomaly_db(path: str) -> None:
+    """Normalized-layout DB with real >24h baselines so detect_anomalies
+    actually fires: one steadily-busy client that then goes silent, one that
+    spikes, plus the duplicate-ip client split across two ids."""
+    random.seed(99)
+    conn = sqlite3.connect(path)
+    c = conn.cursor()
+    _idstore_schema(c)
+    now = _ANOMALY_NOW
+    hours = 24 * 8  # 8 days of hourly history
+
+    def emit(cid, hour_ago, count):
+        base = now - hour_ago * 3600
+        did = _idstore_domain_id(c, "steady.example.com")
+        for _ in range(count):
+            ts = base + random.randint(0, 3599)
+            c.execute(
+                "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                (ts, 1, 2, did, cid),
+            )
+
+    silent = _idstore_client_id(c, "192.168.0.20", "goes-silent")
+    spike = _idstore_client_id(c, "192.168.0.21", "spikes")
+    dup_a = _idstore_client_id(c, _DUP_IP, "")
+    dup_b = _idstore_client_id(c, _DUP_IP, "localhost")
+    for h in range(hours, 0, -1):
+        emit(silent, h, 0 if h <= 3 else 40)      # busy baseline, silent last 3h
+        emit(spike, h, 300 if h == 1 else 20)     # steady then a sharp spike now
+        emit(dup_a, h, 5)                          # duplicate-ip client, both ids
+        emit(dup_b, h, 5)
+    conn.commit()
+    conn.close()
+
+
+class _FixedClock:
+    def time(self):
+        return _ANOMALY_NOW
+
+
+def test_detect_anomalies_matches(tmp_path, monkeypatch):
+    path = str(tmp_path / "pihole-FTL.db")
+    _build_anomaly_db(path)
+    monkeypatch.setattr(db, "DB_PATH", path)
+    # Pin detect_anomalies' clock to the build-time `now`: it reads time.time()
+    # internally, so without this the two sequential calls would use slightly
+    # different baseline windows (a wall-clock race, not a path difference).
+    monkeypatch.setattr(db, "time", _FixedClock())
+    view, idp = _both(monkeypatch, db.detect_anomalies)
+
+    def key(a):
+        return (a["ip"], a["kind"])
+
+    assert sorted(view, key=key) == sorted(idp, key=key)
+    # The rewrite must actually detect something here, not trivially match on [].
+    kinds = {(a["ip"], a["kind"]) for a in idp}
+    assert ("192.168.0.20", "silent") in kinds
+    assert ("192.168.0.21", "spike") in kinds
