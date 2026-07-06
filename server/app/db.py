@@ -259,6 +259,28 @@ def _client_name_map(conn: sqlite3.Connection) -> dict[str, str | None]:
     return {r["ip"]: r["name"] for r in conn.execute("SELECT ip, name FROM network_addresses")}
 
 
+def _domain_text_map(conn: sqlite3.Connection) -> dict[int, str]:
+    """id -> domain text, from domain_by_id. domain_by_id.id is a PK and
+    domain_by_id.domain is UNIQUE, so this is a bijection (see the module note
+    on the normalized fast path). The inverse of the view's per-row lookup,
+    materialized once so a batch of rows can be resolved without the correlated
+    subquery."""
+    return {r["id"]: r["domain"] for r in conn.execute("SELECT id, domain FROM domain_by_id")}
+
+
+def _resolve_domain_value(dom, dmap: dict[int, str]):
+    """Mirror the view's `CASE typeof(domain) WHEN 'integer' THEN <lookup>
+    ELSE domain END` for domains, the exact analogue of _resolve_client_value:
+    an integer id resolves through domain_by_id's text map (None if the id is
+    ORPHANED -- absent from domain_by_id -- exactly as the view's subquery
+    yields NULL for it); a value already stored as text resolves to itself.
+    Callers that group/dedupe on the result therefore treat every orphaned id
+    as the same None bucket, matching the view's single NULL group."""
+    if isinstance(dom, int):
+        return dmap.get(dom)
+    return dom
+
+
 def _resolve_client_value(cid, ipmap: dict[int, str]):
     """Mirror the view's `CASE typeof(client) WHEN 'integer' THEN <lookup>
     ELSE client END`: an integer id resolves through client_by_id's ip map
@@ -434,6 +456,14 @@ def count_queries(
 
 
 def summary(client: str | None, since: int | None, until: int | None) -> dict:
+    # Unbounded whole-db summary is precomputed in the rollup cache. A client
+    # filter or any bound is NOT servable from it (no per-client breakdown; a
+    # bound isn't the "All" range) -- those fall straight through unchanged.
+    if client is None and since is None and until is None:
+        from app import rollups
+        served = rollups.read_summary()
+        if served is not None:
+            return served
     if detect_schema().has_id_storage:
         return _summary_id(client, since, until)
     _, join = _client_join_sql()
@@ -520,6 +550,13 @@ def _summary_id(client: str | None, since: int | None, until: int | None) -> dic
 
 
 def top_domains(client: str | None, since: int | None, limit: int = 15) -> list[dict]:
+    # Unbounded: served from domain_totals (client is None) or client_domain_rollup
+    # (client set) -- both cover the "All" range. Any bound falls through unchanged.
+    if since is None:
+        from app import rollups
+        served = rollups.read_top_domains(client, limit)
+        if served is not None:
+            return served
     if detect_schema().has_id_storage:
         return _top_domains_id(client, since, limit)
     _, join = _client_join_sql()
@@ -593,6 +630,12 @@ def _top_domains_id(client: str | None, since: int | None, limit: int) -> list[d
 
 
 def top_clients(since: int | None, limit: int = 15) -> list[dict]:
+    # Unbounded whole-db client ranking is precomputed in client_totals.
+    if since is None:
+        from app import rollups
+        served = rollups.read_top_clients(limit)
+        if served is not None:
+            return served
     if detect_schema().has_id_storage:
         return _top_clients_id(since, limit)
     select, join = _client_join_sql()
@@ -642,6 +685,14 @@ def _top_clients_id(since: int | None, limit: int) -> list[dict]:
 
 def query_types(client: str | None, since: int | None, until: int | None = None) -> list[dict]:
     """Count of queries grouped by FTL query type, most frequent first."""
+    # Unbounded, no client: query_type_totals holds this exactly. A client filter
+    # has no rollup breakdown (would need a new table), and a bound isn't the
+    # "All" range -- both fall through to the direct scan unchanged.
+    if client is None and since is None and until is None:
+        from app import rollups
+        served = rollups.read_query_types()
+        if served is not None:
+            return served
     if detect_schema().has_id_storage:
         return _query_types_id(client, since, until)
     _, join = _client_join_sql()
