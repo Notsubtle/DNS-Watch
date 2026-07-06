@@ -259,32 +259,17 @@ def _client_name_map(conn: sqlite3.Connection) -> dict[str, str | None]:
     return {r["ip"]: r["name"] for r in conn.execute("SELECT ip, name FROM network_addresses")}
 
 
-def _resolve_domain_value(did, dmap: dict[int, str]):
-    """Mirror the view's `CASE typeof(domain) WHEN 'integer' THEN <lookup>
-    ELSE domain END`: integer ids resolve through domain_by_id (None if a
-    stored id is orphaned, exactly as the view's subquery yields NULL); a
-    value already stored as text resolves to itself."""
-    if isinstance(did, int):
-        return dmap.get(did)
-    return did
-
-
 def _resolve_client_value(cid, ipmap: dict[int, str]):
-    """Client analogue of _resolve_domain_value (see the view's CASE)."""
+    """Mirror the view's `CASE typeof(client) WHEN 'integer' THEN <lookup>
+    ELSE client END`: an integer id resolves through client_by_id's ip map
+    (None if the id is ORPHANED -- absent from client_by_id -- exactly as the
+    view's subquery yields NULL for it); a value already stored as text
+    resolves to itself. Callers that group/dedupe on the result therefore treat
+    every orphaned id as the same None bucket, matching the view's single NULL
+    group."""
     if isinstance(cid, int):
         return ipmap.get(cid)
     return cid
-
-
-def _resolve_domains(conn: sqlite3.Connection, ids: list) -> dict[int, str]:
-    int_ids = [i for i in ids if isinstance(i, int)]
-    if not int_ids:
-        return {}
-    ph = ",".join("?" for _ in int_ids)
-    return {
-        r["id"]: r["domain"]
-        for r in conn.execute(f"SELECT id, domain FROM domain_by_id WHERE id IN ({ph})", int_ids)
-    }
 
 
 def _id_where(
@@ -484,12 +469,20 @@ def summary(client: str | None, since: int | None, until: int | None) -> dict:
 
 def _summary_id(client: str | None, since: int | None, until: int | None) -> dict:
     """Fast path for summary. total/blocked/unique_domains come from a single
-    subquery-free scan of query_storage's raw columns. unique_domains is safe
-    on the raw id because domain_by_id is a bijection (distinct ids == distinct
-    texts). unique_clients CANNOT use COUNT(DISTINCT client) on the raw id --
-    two ids can share one ip -- so the distinct client ids are fetched (a tiny
-    set) and de-duplicated by resolved ip in Python, matching the view's
-    COUNT(DISTINCT resolved_ip)."""
+    subquery-free scan of query_storage's raw columns. unique_domains counts
+    DISTINCT resolved domains, matching the view's COUNT(DISTINCT domain): the
+    LEFT JOIN to domain_by_id yields d.id == q.domain for a resolvable id
+    (bijection, so distinct ids == distinct texts) and NULL for an ORPHANED id
+    -- one whose row is missing from domain_by_id -- which COUNT(DISTINCT ...)
+    then skips, exactly as the view resolves an orphan to NULL and skips it.
+    Grouping on the raw id alone would instead count every orphaned id as its
+    own "distinct domain", overcounting. The join is a single indexed PK seek
+    per row, not the view's per-column correlated subquery. unique_clients
+    CANNOT use COUNT(DISTINCT client) on the raw id -- two ids can share one ip
+    -- so the distinct client ids are fetched (a tiny set) and de-duplicated by
+    resolved ip in Python; unresolved/orphaned client ids resolve to None and
+    are excluded, matching the view's COUNT(DISTINCT resolved_ip) skipping
+    NULLs."""
     blocked_in = ",".join(str(s) for s in BLOCKED_STATUSES)
     with _connect() as conn:
         client_ids = _client_ids_for_ip(conn, client) if client else None
@@ -499,8 +492,9 @@ def _summary_id(client: str | None, since: int | None, until: int | None) -> dic
             SELECT
                 COUNT(*) AS total,
                 SUM(CASE WHEN q.status IN ({blocked_in}) THEN 1 ELSE 0 END) AS blocked,
-                COUNT(DISTINCT q.domain) AS unique_domains
+                COUNT(DISTINCT d.id) AS unique_domains
             FROM query_storage q
+            LEFT JOIN domain_by_id d ON d.id = q.domain
             WHERE {where_sql}
             """,
             params,
@@ -513,7 +507,9 @@ def _summary_id(client: str | None, since: int | None, until: int | None) -> dic
 
     total = r["total"] or 0
     blocked = r["blocked"] or 0
-    unique_clients = len({_resolve_client_value(row["cid"], ipmap) for row in distinct_cids})
+    unique_clients = len(
+        {_resolve_client_value(row["cid"], ipmap) for row in distinct_cids} - {None}
+    )
     return {
         "total_queries": total,
         "blocked": blocked,
@@ -545,23 +541,55 @@ def top_domains(client: str | None, since: int | None, limit: int = 15) -> list[
 
 
 def _top_domains_id(client: str | None, since: int | None, limit: int) -> list[dict]:
-    """Fast path: GROUP BY the raw integer domain id on query_storage, then
-    resolve only the top `limit` ids to text. domain_by_id is a bijection so
-    this is identical to the view-based grouping (see module note)."""
+    """Fast path: GROUP BY the raw integer domain id on query_storage. Resolvable
+    ids are a bijection with their text (domain_by_id.domain is UNIQUE), so each
+    is its own group and never merges with another -- the INNER JOIN yields the
+    resolved text directly and the top `limit` fall straight out of SQL.
+
+    ORPHANED ids -- referenced by query_storage but absent from domain_by_id --
+    are the exception: the view resolves EVERY orphan to NULL, so they all
+    collapse into a SINGLE NULL group whose count is the sum across all orphaned
+    ids. Grouping on the raw id can't see that (each orphan id is a distinct
+    integer, hence a distinct group), and an orphan that is individually below
+    the top-N cut can still belong in the result once summed -- so a naive
+    "overfetch a margin then merge" is not safe here. Instead the orphan rows
+    are counted as one group directly in SQL (LEFT JOIN ... WHERE d.id IS NULL),
+    then folded in as a single {domain: None} entry before the final sort/limit,
+    reproducing the view's single-NULL-group semantics exactly."""
     with _connect() as conn:
         client_ids = _client_ids_for_ip(conn, client) if client else None
         where_sql, params = _id_where(client_ids=client_ids, since=since)
-        sql = f"""
-            SELECT q.domain AS did, COUNT(*) AS n
+        # Non-orphan domains: bijection, so raw-id groups == resolved-text groups.
+        # LIMIT here is safe -- at most `limit` of these can survive the final cut,
+        # even after the single orphan group is added below.
+        rows = conn.execute(
+            f"""
+            SELECT d.domain AS domain, COUNT(*) AS n
             FROM query_storage q
+            JOIN domain_by_id d ON d.id = q.domain
             WHERE {where_sql}
             GROUP BY q.domain
             ORDER BY n DESC
             LIMIT ?
-        """
-        rows = conn.execute(sql, [*params, limit]).fetchall()
-        dmap = _resolve_domains(conn, [r["did"] for r in rows])
-    return [{"domain": _resolve_domain_value(r["did"], dmap), "count": r["n"]} for r in rows]
+            """,
+            [*params, limit],
+        ).fetchall()
+        # Every orphaned domain id, summed into one NULL group (the view's shape).
+        orphan_n = conn.execute(
+            f"""
+            SELECT COUNT(*) AS n
+            FROM query_storage q
+            LEFT JOIN domain_by_id d ON d.id = q.domain
+            WHERE {where_sql} AND d.id IS NULL AND typeof(q.domain) = 'integer'
+            """,
+            params,
+        ).fetchone()["n"]
+
+    out = [{"domain": r["domain"], "count": r["n"]} for r in rows]
+    if orphan_n:
+        out.append({"domain": None, "count": orphan_n})
+    out.sort(key=lambda x: x["count"], reverse=True)
+    return out[:limit]
 
 
 def top_clients(since: int | None, limit: int = 15) -> list[dict]:
