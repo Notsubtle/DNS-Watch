@@ -125,3 +125,48 @@ def test_top_domains_client_filter_matches(idb, monkeypatch):
 def test_top_domains_unknown_client_empty(idb, monkeypatch):
     view, idp = _both(monkeypatch, lambda: db.top_domains("10.0.0.254", None, limit=15))
     assert view == idp == []
+
+
+def test_top_clients_matches(idb, monkeypatch):
+    # Full ranking so ties don't matter; the duplicate-ip client must appear
+    # ONCE with its two ids' counts merged (a naive raw-id group would show 2).
+    view, idp = _both(monkeypatch, lambda: db.top_clients(None, limit=1000))
+    vm = {r["ip"]: (r["count"], r["name"]) for r in view}
+    im = {r["ip"]: (r["count"], r["name"]) for r in idp}
+    assert vm == im
+    assert _DUP_IP in im  # 127.0.0.1 present as a single merged row
+    # Default top-15 counts sequence matches too.
+    v15, i15 = _both(monkeypatch, lambda: db.top_clients(None, limit=15))
+    assert [r["count"] for r in v15] == [r["count"] for r in i15]
+
+
+def test_query_types_matches(idb, monkeypatch):
+    view, idp = _both(monkeypatch, lambda: db.query_types(None, None, None))
+    assert view == idp
+    # With a client filter (the duplicate-ip client).
+    v2, i2 = _both(monkeypatch, lambda: db.query_types(_DUP_IP, None, None))
+    assert v2 == i2
+
+
+def test_timeseries_matches(idb, monkeypatch):
+    # Pin `until` so the two sequential calls share an identical window: with
+    # until=None each call re-reads int(time.time()) and can land in a
+    # different second, changing the bucket width for reasons unrelated to the
+    # path under test. (`since=None` still exercises the MIN-derived window.)
+    view, idp = _both(monkeypatch, lambda: db.timeseries(None, None, 1_700_000_100, buckets=50))
+    assert view == idp
+    # Bounded window + client filter.
+    v2, i2 = _both(
+        monkeypatch,
+        lambda: db.timeseries("192.168.0.10", 1_699_500_000, 1_700_000_000, buckets=40),
+    )
+    assert v2 == i2
+
+
+def test_summary_matches(idb, monkeypatch):
+    view, idp = _both(monkeypatch, lambda: db.summary(None, None, None))
+    assert view == idp
+    # unique_clients must dedupe the duplicate ip: filtering on it yields 1.
+    v2, i2 = _both(monkeypatch, lambda: db.summary(_DUP_IP, None, None))
+    assert v2 == i2
+    assert i2["unique_clients"] == 1

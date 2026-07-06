@@ -441,6 +441,8 @@ def count_queries(
 
 
 def summary(client: str | None, since: int | None, until: int | None) -> dict:
+    if detect_schema().has_id_storage:
+        return _summary_id(client, since, until)
     _, join = _client_join_sql()
     where_sql, params = _build_where(client=client, since=since, until=until)
     blocked_in = ",".join(str(s) for s in BLOCKED_STATUSES)
@@ -468,6 +470,47 @@ def summary(client: str | None, since: int | None, until: int | None) -> dict:
         "blocked": blocked,
         "blocked_pct": round((blocked / total) * 100, 1) if total else 0.0,
         "unique_clients": r["unique_clients"] or 0,
+        "unique_domains": r["unique_domains"] or 0,
+    }
+
+
+def _summary_id(client: str | None, since: int | None, until: int | None) -> dict:
+    """Fast path for summary. total/blocked/unique_domains come from a single
+    subquery-free scan of query_storage's raw columns. unique_domains is safe
+    on the raw id because domain_by_id is a bijection (distinct ids == distinct
+    texts). unique_clients CANNOT use COUNT(DISTINCT client) on the raw id --
+    two ids can share one ip -- so the distinct client ids are fetched (a tiny
+    set) and de-duplicated by resolved ip in Python, matching the view's
+    COUNT(DISTINCT resolved_ip)."""
+    blocked_in = ",".join(str(s) for s in BLOCKED_STATUSES)
+    with _connect() as conn:
+        client_ids = _client_ids_for_ip(conn, client) if client else None
+        where_sql, params = _id_where(client_ids=client_ids, since=since, until=until)
+        r = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN q.status IN ({blocked_in}) THEN 1 ELSE 0 END) AS blocked,
+                COUNT(DISTINCT q.domain) AS unique_domains
+            FROM query_storage q
+            WHERE {where_sql}
+            """,
+            params,
+        ).fetchone()
+        distinct_cids = conn.execute(
+            f"SELECT DISTINCT q.client AS cid FROM query_storage q WHERE {where_sql}",
+            params,
+        ).fetchall()
+        ipmap = _client_ip_map(conn)
+
+    total = r["total"] or 0
+    blocked = r["blocked"] or 0
+    unique_clients = len({_resolve_client_value(row["cid"], ipmap) for row in distinct_cids})
+    return {
+        "total_queries": total,
+        "blocked": blocked,
+        "blocked_pct": round((blocked / total) * 100, 1) if total else 0.0,
+        "unique_clients": unique_clients,
         "unique_domains": r["unique_domains"] or 0,
     }
 
@@ -514,6 +557,8 @@ def _top_domains_id(client: str | None, since: int | None, limit: int) -> list[d
 
 
 def top_clients(since: int | None, limit: int = 15) -> list[dict]:
+    if detect_schema().has_id_storage:
+        return _top_clients_id(since, limit)
     select, join = _client_join_sql()
     where_sql, params = _build_where(since=since)
 
@@ -535,8 +580,34 @@ def top_clients(since: int | None, limit: int = 15) -> list[dict]:
     ]
 
 
+def _top_clients_id(since: int | None, limit: int) -> list[dict]:
+    """Fast path: GROUP BY the raw integer client id (avoids resolving every
+    row's ip through the view's subquery), then MERGE by resolved ip. The
+    merge is essential: client_by_id is not injective on ip, so two ids can
+    map to one client and the trusted view groups by ip. Client cardinality
+    is tiny, so fetching every client group (no SQL LIMIT) then sorting in
+    Python is cheap and lets the merge happen before the top-N cut."""
+    with _connect() as conn:
+        where_sql, params = _id_where(since=since)
+        rows = conn.execute(
+            f"SELECT q.client AS cid, COUNT(*) AS n FROM query_storage q "
+            f"WHERE {where_sql} GROUP BY q.client",
+            params,
+        ).fetchall()
+        ipmap = _client_ip_map(conn)
+        namemap = _client_name_map(conn)
+    merged: dict = {}
+    for r in rows:
+        ip = _resolve_client_value(r["cid"], ipmap)
+        merged[ip] = merged.get(ip, 0) + r["n"]
+    ordered = sorted(merged.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    return [{"ip": ip, "name": namemap.get(ip) or ip, "count": n} for ip, n in ordered]
+
+
 def query_types(client: str | None, since: int | None, until: int | None = None) -> list[dict]:
     """Count of queries grouped by FTL query type, most frequent first."""
+    if detect_schema().has_id_storage:
+        return _query_types_id(client, since, until)
     _, join = _client_join_sql()
     where_sql, params = _build_where(client=client, since=since, until=until)
     sql = f"""
@@ -555,6 +626,23 @@ def query_types(client: str | None, since: int | None, until: int | None = None)
     ]
 
 
+def _query_types_id(client: str | None, since: int | None, until: int | None) -> list[dict]:
+    """Fast path: `type` is a raw column on query_storage, so the view's
+    per-row domain/client resolution was pure overhead here — group directly."""
+    with _connect() as conn:
+        client_ids = _client_ids_for_ip(conn, client) if client else None
+        where_sql, params = _id_where(client_ids=client_ids, since=since, until=until)
+        rows = conn.execute(
+            f"SELECT q.type AS type_code, COUNT(*) AS n FROM query_storage q "
+            f"WHERE {where_sql} GROUP BY q.type ORDER BY n DESC",
+            params,
+        ).fetchall()
+    return [
+        {"type_code": r["type_code"], "type": type_name(r["type_code"]), "count": r["n"]}
+        for r in rows
+    ]
+
+
 def timeseries(
     client: str | None,
     since: int | None,
@@ -567,6 +655,8 @@ def timeseries(
     a continuous chart without inferring gaps. When `since` is unknown (range
     "all"), the window is derived from the data's own min/max timestamp.
     """
+    if detect_schema().has_id_storage:
+        return _timeseries_id(client, since, until, buckets)
     _, join = _client_join_sql()
     blocked_in = ",".join(str(s) for s in BLOCKED_STATUSES)
     allowed_in = ",".join(str(s) for s in ALLOWED_STATUSES)
@@ -607,6 +697,62 @@ def timeseries(
         ORDER BY bucket
     """
     with _connect() as conn:
+        rows = conn.execute(sql, [win_since, width, *params]).fetchall()
+
+    by_bucket = {r["bucket"]: r for r in rows}
+    n = int((span // width)) + 1
+    series = []
+    for i in range(n):
+        r = by_bucket.get(i)
+        series.append({
+            "t": win_since + i * width,
+            "allowed": (r["allowed"] if r else 0) or 0,
+            "blocked": (r["blocked"] if r else 0) or 0,
+            "total": (r["total"] if r else 0) or 0,
+        })
+    return {"since": win_since, "until": win_until, "bucket_seconds": width, "series": series}
+
+
+def _timeseries_id(
+    client: str | None, since: int | None, until: int | None, buckets: int
+) -> dict:
+    """Fast path for timeseries: identical bucketing/series assembly as the
+    view-based path, but bucketed/summed directly on query_storage's raw
+    timestamp/status columns (no per-row domain/client resolution). Only the
+    client filter needs id translation."""
+    blocked_in = ",".join(str(s) for s in BLOCKED_STATUSES)
+    allowed_in = ",".join(str(s) for s in ALLOWED_STATUSES)
+
+    with _connect() as conn:
+        client_ids = _client_ids_for_ip(conn, client) if client else None
+
+        win_until = until if until else int(time.time())
+        if since:
+            win_since = since
+        else:
+            base_where, base_params = _id_where(client_ids=client_ids, until=until)
+            row = conn.execute(
+                f"SELECT MIN(q.timestamp) AS mn FROM query_storage q WHERE {base_where}",
+                base_params,
+            ).fetchone()
+            win_since = row["mn"] if row and row["mn"] is not None else win_until
+
+        span = max(1, win_until - win_since)
+        buckets = max(1, min(buckets, 500))
+        width = max(1, span // buckets)
+
+        where_sql, params = _id_where(client_ids=client_ids, since=win_since, until=win_until)
+        sql = f"""
+            SELECT
+                CAST((q.timestamp - ?) / ? AS INTEGER) AS bucket,
+                SUM(CASE WHEN q.status IN ({allowed_in}) THEN 1 ELSE 0 END) AS allowed,
+                SUM(CASE WHEN q.status IN ({blocked_in}) THEN 1 ELSE 0 END) AS blocked,
+                COUNT(*) AS total
+            FROM query_storage q
+            WHERE {where_sql}
+            GROUP BY bucket
+            ORDER BY bucket
+        """
         rows = conn.execute(sql, [win_since, width, *params]).fetchall()
 
     by_bucket = {r["bucket"]: r for r in rows}
