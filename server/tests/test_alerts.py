@@ -94,6 +94,15 @@ def test_device_quiet_rule(client, ftl):
     quiet = [e for e in events if e["type"] == "device_quiet"]
     assert quiet and any("oldtv" in e["message"] for e in quiet)
 
+    # #6/#7: the same presence qualifier detect_anomalies()'s "silent" case
+    # would attach for this client, so Alerts/Anomalies never disagree.
+    from app import db
+    msg = next(e["message"] for e in quiet if "oldtv" in e["message"])
+    if ftl["schema"] in ("real", "idstore"):
+        assert db.PRESENCE_MAC_KNOWN_NOTE in msg
+    else:
+        assert db.PRESENCE_MAC_UNKNOWN_NOTE in msg
+
 
 def test_settings_roundtrip_and_format_validation(client):
     assert client.get("/api/settings").json()["webhook_enabled"] is False

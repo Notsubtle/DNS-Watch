@@ -26,6 +26,7 @@ import statistics
 import time
 
 import regex as _timed_regex
+from app import oui
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -69,6 +70,12 @@ class Schema:
     # paying the view's per-row correlated subquery. Purely additive: older
     # shapes (no query_storage) leave this False and behave exactly as before.
     has_id_storage: bool = False
+    # Whether the `network` table exists and carries `hwaddr`/`macVendor`
+    # columns (real Pi-hole v6 and the normalized "idstore" layout both have
+    # this; the plain `client`-table schema has no `network` table at all, and
+    # the oldest schema we support has a `network` table with only a bare
+    # `name` column). Vendor enrichment (#4/#5) is a no-op when this is False.
+    has_vendor_data: bool = False
 
 
 def _connect() -> sqlite3.Connection:
@@ -93,10 +100,15 @@ def detect_schema() -> Schema:
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         has_id_storage = {"query_storage", "domain_by_id", "client_by_id"}.issubset(tables)
+        has_vendor_data = False
+        if "network" in tables and "network_addresses" in tables:
+            net_cols = {row["name"] for row in conn.execute("PRAGMA table_info(network)")}
+            has_vendor_data = {"hwaddr", "macVendor"}.issubset(net_cols)
     return Schema(
         has_client_table=has_client_table,
         na_has_name=na_has_name,
         has_id_storage=has_id_storage,
+        has_vendor_data=has_vendor_data,
     )
 
 
@@ -259,6 +271,69 @@ def _client_name_map(conn: sqlite3.Connection) -> dict[str, str | None]:
     return {r["ip"]: r["name"] for r in conn.execute("SELECT ip, name FROM network_addresses")}
 
 
+def is_placeholder_hwaddr(hwaddr: str | None) -> bool:
+    """True when Pi-hole never captured a real layer-2 address for this client.
+
+    Pi-hole falls back to a synthetic `ip-<addr>` value in `network.hwaddr`
+    whenever it has no observed MAC for a client (cross-subnet/VLAN traffic,
+    an expired DHCP lease record, a gap after a Pi-hole restart, ...) — see
+    issue #4/#7. Callers use this to distinguish "we know the vendor is
+    unknown" from "we can't know the vendor at all for this client"."""
+    return not hwaddr or hwaddr.startswith("ip-")
+
+
+def _client_vendor_map(conn: sqlite3.Connection) -> dict[str, dict]:
+    """ip -> {"hwaddr", "mac_known", "vendor", "vendor_unknown_reason"}, from
+    `network`/`network_addresses`, with an offline OUI-table fallback (#5)
+    when Pi-hole's own `macVendor` is empty.
+
+    Independent of `_client_join_sql()`'s name-only join: real Pi-hole v6
+    (`na_has_name=True`) never joins `network` there, since the name lives on
+    `network_addresses.name`. Vendor data (hwaddr/macVendor) only lives on
+    `network`, so it needs its own join through `network_addresses.network_id`.
+    Returns {} entirely when `has_vendor_data` is False (schema has no
+    `network` table, or one without hwaddr/macVendor columns)."""
+    if not detect_schema().has_vendor_data:
+        return {}
+    rows = conn.execute(
+        "SELECT na.ip AS ip, n.hwaddr AS hwaddr, n.macVendor AS vendor "
+        "FROM network_addresses na JOIN network n ON n.id = na.network_id"
+    ).fetchall()
+    out: dict[str, dict] = {}
+    for r in rows:
+        mac_known = not is_placeholder_hwaddr(r["hwaddr"])
+        hwaddr = r["hwaddr"] if mac_known else None
+        vendor = (r["vendor"] or None) if mac_known else None
+        reason = None
+        if mac_known and not vendor:
+            # Pi-hole didn't resolve a vendor itself — try our own offline
+            # MA-L lookup before giving up. A locally-administered (randomized)
+            # MAC has no vendor in ANY registry by design, so label that
+            # distinctly from "real MAC, genuinely not in our table".
+            if oui.is_locally_administered(hwaddr):
+                reason = "randomized"
+            else:
+                vendor = oui.lookup_vendor(hwaddr)
+                reason = None if vendor else "unlisted"
+        out[r["ip"]] = {
+            "hwaddr": hwaddr,
+            "mac_known": mac_known,
+            "vendor": vendor,
+            "vendor_unknown_reason": reason,
+        }
+    return out
+
+
+def _vendor_fields(ip: str, vmap: dict[str, dict]) -> dict:
+    """Default vendor fields for a client absent from vmap (no vendor row at
+    all — e.g. a `client`-table schema, or a client Pi-hole's `network` table
+    never recorded)."""
+    return vmap.get(
+        ip,
+        {"hwaddr": None, "mac_known": False, "vendor": None, "vendor_unknown_reason": None},
+    )
+
+
 def _domain_text_map(conn: sqlite3.Connection) -> dict[int, str]:
     """id -> domain text, from domain_by_id. domain_by_id.id is a PK and
     domain_by_id.domain is UNIQUE, so this is a bijection (see the module note
@@ -340,11 +415,13 @@ def list_clients() -> list[dict]:
     """
     with _connect() as conn:
         rows = conn.execute(sql).fetchall()
+        vmap = _client_vendor_map(conn)
     return [
         {
             "ip": r["client_ip"],
             "name": r["client_name"] or r["client_ip"],
             "query_count": r["query_count"],
+            **_vendor_fields(r["client_ip"], vmap),
         }
         for r in rows
     ]
@@ -1086,6 +1163,7 @@ def client_detail(ip: str, since: int | None, until: int | None) -> dict:
             f"FROM queries q {join} WHERE {ccol} = ?",
             [ip],
         ).fetchone()
+        vendor_fields = _vendor_fields(ip, _client_vendor_map(conn))
     name = row["client_name"] if row and row["client_name"] else ip
     return {
         "ip": ip,
@@ -1096,6 +1174,7 @@ def client_detail(ip: str, since: int | None, until: int | None) -> dict:
         "top_domains": top_domains(ip, since, limit=10),
         "query_types": query_types(ip, since, until),
         "timeseries": timeseries(ip, since, until, buckets=40),
+        **vendor_fields,
     }
 
 
@@ -1535,6 +1614,8 @@ def detect_anomalies() -> list[dict]:
                 "baseline_avg": round(avg, 2), "baseline_stddev": round(stddev, 2),
                 "current_value": 0,
                 "window_since": baseline_end, "window_until": now,
+                # Shared with alerts.py's device_quiet rule (#6/#7).
+                "presence_note": quiet_presence_note(ip),
             })
             continue
 
@@ -1548,6 +1629,29 @@ def detect_anomalies() -> list[dict]:
             })
 
     return anomalies
+
+
+# Shared presence qualifier for "this client went quiet" events (#6/#7),
+# consumed by both alerts.py's device_quiet rule and detect_anomalies()'s
+# "silent" case so the two surfaces never disagree about the same client.
+# No active network probing (see #7) — DNS Watch's container has no LAN-layer
+# visibility (default Docker bridge networking), so this labels honestly
+# from data already on hand instead of guessing reachability.
+PRESENCE_MAC_KNOWN_NOTE = (
+    "may be offline, or may have switched to a different DNS resolver "
+    "(DoH, VPN, hardcoded upstream)"
+)
+PRESENCE_MAC_UNKNOWN_NOTE = (
+    "presence cannot be determined — DNS Watch never observed this device's "
+    "hardware address"
+)
+
+
+def quiet_presence_note(ip: str) -> str:
+    """The qualifier to append to a "client went quiet" message/event for `ip`."""
+    with _connect() as conn:
+        mac_known = _vendor_fields(ip, _client_vendor_map(conn))["mac_known"]
+    return PRESENCE_MAC_KNOWN_NOTE if mac_known else PRESENCE_MAC_UNKNOWN_NOTE
 
 
 def health() -> dict:

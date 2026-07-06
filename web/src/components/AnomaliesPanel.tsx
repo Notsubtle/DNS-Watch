@@ -43,7 +43,10 @@ export default function AnomaliesPanel({ anomalies, onSelect, onSelectIp }: Prop
               onClick={() => onSelect(a)}
               role="button"
               tabIndex={0}
-              title={`Baseline: ${a.baseline_avg}/hr (±${a.baseline_stddev}) · Current: ${a.current_value}/hr`}
+              title={
+                `Baseline: ${a.baseline_avg}/hr (±${a.baseline_stddev}) · Current: ${a.current_value}/hr` +
+                (a.presence_note ? ` · ${a.presence_note}` : "")
+              }
             >
               <span className={`alert-dot ${a.kind === "silent" ? "warning" : "critical"}`} />
               <span className="alert-msg">{describe(a)}</span>

@@ -23,6 +23,47 @@ def test_summary_matches_ground_truth(ftl):
     assert s["blocked_pct"] == round(blocked / total * 100, 1)
 
 
+def test_vendor_oui_fallback_and_randomized_mac(ftl):
+    """#5: when Pi-hole's own macVendor is empty, DNS Watch falls back to its
+    offline OUI table for a real, listed prefix — and labels a
+    locally-administered (randomized/private) MAC distinctly rather than
+    treating it as a plain miss. Only "real"/"idstore" schemas have a
+    `network` table with hwaddr/macVendor at all (see #4)."""
+    if ftl["schema"] not in ("real", "idstore"):
+        return
+    import sqlite3
+    from app import db
+
+    conn = sqlite3.connect(ftl["path"])
+    # 00:00:01:.. is a real, listed IEEE MA-L prefix (Xerox) — clear Pi-hole's
+    # own macVendor so the OUI-table fallback is what actually resolves it.
+    conn.execute(
+        "UPDATE network SET hwaddr = '00:00:01:aa:bb:cc', macVendor = '' "
+        "WHERE id = (SELECT network_id FROM network_addresses WHERE ip = ?)",
+        ("192.168.1.10",),
+    )
+    # 02:.. has the locally-administered bit set — a randomized/private MAC,
+    # which has no vendor in any registry by design.
+    conn.execute(
+        "UPDATE network SET hwaddr = '02:11:22:33:44:55', macVendor = '' "
+        "WHERE id = (SELECT network_id FROM network_addresses WHERE ip = ?)",
+        ("192.168.1.11",),
+    )
+    conn.commit()
+    conn.close()
+
+    clients = {c["ip"]: c for c in db.list_clients()}
+    xerox = clients["192.168.1.10"]
+    assert xerox["mac_known"] is True
+    assert xerox["vendor"] == "XEROX CORPORATION"
+    assert xerox["vendor_unknown_reason"] is None
+
+    randomized = clients["192.168.1.11"]
+    assert randomized["mac_known"] is True
+    assert randomized["vendor"] is None
+    assert randomized["vendor_unknown_reason"] == "randomized"
+
+
 def test_status_filter_is_sql_not_post_limit(ftl):
     from app import db
     # Ask for 10 blocked with a small limit: must return 10 blocked, not "10

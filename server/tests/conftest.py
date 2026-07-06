@@ -114,6 +114,15 @@ def _idstore_client_id(c: sqlite3.Cursor, ip: str, name: str | None) -> int:
     c.execute("INSERT INTO client_by_id (id, ip, name) VALUES (?,?,?)", (next_id, ip, name))
     if not c.execute("SELECT 1 FROM network_addresses WHERE ip = ?", (ip,)).fetchone():
         na_name = name if name else None
+        # `network_addresses.network_id` reuses this client_by_id id as a
+        # standalone key into `network` (the two tables aren't otherwise
+        # related in this synthetic fixture) — give it a matching `network`
+        # row too, mirroring the "real" schema fixture below, so vendor
+        # enrichment (#4) has something real to read in "idstore" tests.
+        c.execute(
+            "INSERT INTO network (id, hwaddr, macVendor) VALUES (?,?,?)",
+            (next_id, f"de:ad:be:ef:01:{next_id:02x}", "TestVendor"),
+        )
         c.execute(
             "INSERT INTO network_addresses (network_id, ip, lastSeen, name, nameUpdated) "
             "VALUES (?,?,?,?,?)",

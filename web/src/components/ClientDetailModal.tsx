@@ -67,6 +67,14 @@ export default function ClientDetailModal({ ip, range, onClose }: Props) {
           <>
             <div className="modal-sub">
               First seen {fmtDate(data.first_seen)} · last seen {fmtDate(data.last_seen)} · window: {range}
+              {data.mac_known && data.vendor && <> · vendor: {data.vendor}</>}
+              {data.mac_known && !data.vendor && data.vendor_unknown_reason === "randomized" && (
+                <> · vendor: unknown (randomized/private MAC)</>
+              )}
+              {data.mac_known && !data.vendor && data.vendor_unknown_reason !== "randomized" && (
+                <> · vendor: unknown</>
+              )}
+              {!data.mac_known && <> · vendor: unknown (no MAC observed)</>}
             </div>
 
             <SummaryCards summary={data.summary} />
