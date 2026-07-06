@@ -42,6 +42,17 @@ def _alert_scheduler() -> None:
             rollups.refresh_rollups()
         except Exception:  # noqa: BLE001 — a rollup hiccup must not kill alerting
             pass
+        try:
+            # Piggyback the rare (default: daily) full reconciliation on the same
+            # tick. It self-gates on its own last-reconciled clock, so all but one
+            # tick a day is a single indexed read; on the tick it does fire it
+            # rebuilds the rollup tables from scratch to erase the drift Pi-hole's
+            # own row pruning otherwise leaves behind (see rollups.reconcile_rollups).
+            # Its own try/except so a reconciliation failure can't block or kill
+            # alerting or the incremental refresh — same contract as the two above.
+            rollups.reconcile_rollups()
+        except Exception:  # noqa: BLE001 — a reconciliation hiccup must not kill the loop
+            pass
         _scheduler_stop.wait(ALERT_EVAL_INTERVAL)
 
 
