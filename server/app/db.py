@@ -456,6 +456,14 @@ def count_queries(
 
 
 def summary(client: str | None, since: int | None, until: int | None) -> dict:
+    # Unbounded whole-db summary is precomputed in the rollup cache. A client
+    # filter or any bound is NOT servable from it (no per-client breakdown; a
+    # bound isn't the "All" range) -- those fall straight through unchanged.
+    if client is None and since is None and until is None:
+        from app import rollups
+        served = rollups.read_summary()
+        if served is not None:
+            return served
     if detect_schema().has_id_storage:
         return _summary_id(client, since, until)
     _, join = _client_join_sql()
@@ -542,6 +550,13 @@ def _summary_id(client: str | None, since: int | None, until: int | None) -> dic
 
 
 def top_domains(client: str | None, since: int | None, limit: int = 15) -> list[dict]:
+    # Unbounded: served from domain_totals (client is None) or client_domain_rollup
+    # (client set) -- both cover the "All" range. Any bound falls through unchanged.
+    if since is None:
+        from app import rollups
+        served = rollups.read_top_domains(client, limit)
+        if served is not None:
+            return served
     if detect_schema().has_id_storage:
         return _top_domains_id(client, since, limit)
     _, join = _client_join_sql()
@@ -615,6 +630,12 @@ def _top_domains_id(client: str | None, since: int | None, limit: int) -> list[d
 
 
 def top_clients(since: int | None, limit: int = 15) -> list[dict]:
+    # Unbounded whole-db client ranking is precomputed in client_totals.
+    if since is None:
+        from app import rollups
+        served = rollups.read_top_clients(limit)
+        if served is not None:
+            return served
     if detect_schema().has_id_storage:
         return _top_clients_id(since, limit)
     select, join = _client_join_sql()
@@ -664,6 +685,14 @@ def _top_clients_id(since: int | None, limit: int) -> list[dict]:
 
 def query_types(client: str | None, since: int | None, until: int | None = None) -> list[dict]:
     """Count of queries grouped by FTL query type, most frequent first."""
+    # Unbounded, no client: query_type_totals holds this exactly. A client filter
+    # has no rollup breakdown (would need a new table), and a bound isn't the
+    # "All" range -- both fall through to the direct scan unchanged.
+    if client is None and since is None and until is None:
+        from app import rollups
+        served = rollups.read_query_types()
+        if served is not None:
+            return served
     if detect_schema().has_id_storage:
         return _query_types_id(client, since, until)
     _, join = _client_join_sql()

@@ -68,9 +68,11 @@ design and why in-place truncate is correct here).
 
 SCOPE
 -----
-This module is the rollup schema, the core incremental-update function, and the
-periodic full reconciliation. Wiring the dashboard READ paths onto these tables
-is still a separate, later task -- intentionally not here.
+This module is the rollup schema, the core incremental-update function, the
+periodic full reconciliation, and (added later) the dashboard READ paths that
+serve the unbounded "All" range straight off these precomputed tables. The read
+functions live at the bottom of the file, under READ PATHS; db.py dispatches to
+them for the `since is None` case and falls back to its direct scans otherwise.
 """
 
 from __future__ import annotations
@@ -564,3 +566,180 @@ def reconcile_rollups(interval_seconds: int = 86400, force: bool = False) -> dic
         "processed": result["processed"],
         "batches": result["batches"],
     }
+
+
+# ==========================================================================
+# READ PATHS
+# --------------------------------------------------------------------------
+# The dashboard's unbounded "All" range (db.py's functions called with
+# since=None) is the ONLY case these serve -- bounded ranges are already fast
+# on Pi-hole's own timestamp index and must never touch this cache (db.py's
+# dispatch guarantees that; these functions are simply never called for a
+# bounded range).
+#
+# Each read returns a result byte-for-byte equivalent to db.py's direct scan on
+# the same data, OR None to signal "I can't serve this -- fall through to the
+# direct path". None is returned in exactly one structural case: the rollup has
+# never been backfilled (cursor still NULL), so its tables are empty for a
+# reason UNRELATED to the real data. Serving zeros there would be wrong (not
+# merely stale); the direct scan is correct-but-slow and is the right answer
+# until the first scheduler tick backfills. Once the cursor has advanced even
+# once, these tables are trusted as the (possibly up-to-one-tick-stale) truth --
+# that lag is the deliberate design tradeoff, not an error (see module docstring).
+#
+# ORPHAN RECONSTRUCTION. domain_totals/client_totals key on RESOLVED text and
+# EXCLUDE orphaned ids (an id with no lookup row) entirely -- there is no NULL
+# key (SQLite ON CONFLICT can't dedupe NULL keys; see the module docstring's
+# RESOLUTION section). But db.py's direct top_domains/top_clients DO emit a
+# single collapsed {None: sum-of-all-orphan-rows} group (mirroring the view's
+# one NULL group). That group is recovered here WITHOUT any schema change, from
+# an invariant every refresh preserves: query_type_totals counts EVERY row
+# exactly once, while domain_totals counts only rows whose domain resolved. Their
+# difference is precisely the orphaned-domain row count -- the size of the None
+# group. Same for clients (total rows minus resolved-client rows). This is plain
+# arithmetic over existing columns, not a new rollup column.
+# ==========================================================================
+
+
+def _rollups_backfilled(conn: sqlite3.Connection) -> bool:
+    """True once refresh_rollups has advanced the cursor at least once, i.e. the
+    tables reflect real data rather than the empty just-created state. A NULL
+    cursor means "never backfilled" -> the caller must fall through to the direct
+    scan (empty rollups are not a valid answer, only a not-ready one)."""
+    row = conn.execute(
+        "SELECT last_query_id FROM rollup_cursor WHERE id = 1"
+    ).fetchone()
+    return row is not None and row["last_query_id"] is not None
+
+
+def _total_rows(conn: sqlite3.Connection) -> int:
+    """Every query the rollup has processed, counted once. query_type_totals is
+    the right source: _Deltas.add increments it for EVERY row unconditionally
+    (unlike domain/client totals, which skip orphans)."""
+    return conn.execute(
+        "SELECT COALESCE(SUM(count), 0) AS n FROM query_type_totals"
+    ).fetchone()["n"]
+
+
+def read_summary() -> dict | None:
+    """Serve db.summary(None, None, None) -- the whole-db, no-client, no-until
+    case -- entirely from the rollups. A client filter or any bound is NOT
+    served here (client_totals has no per-client blocked/total breakdown, and a
+    bound isn't the All range); db.py only calls this for the servable case.
+
+    total_queries == SUM(query_type_totals) (every row). blocked ==
+    SUM(daily_totals.blocked_count) (daily counts blocked independently of
+    domain/client resolution, so orphan rows are included, matching the direct
+    COUNT). unique_domains/unique_clients == the row counts of domain_totals/
+    client_totals, which hold exactly the DISTINCT resolved domains/ips with
+    orphans excluded -- identical to the direct path's COUNT(DISTINCT ...)
+    skipping NULLs."""
+    init_rollup_store()
+    with _connect() as conn:
+        if not _rollups_backfilled(conn):
+            return None
+        total = _total_rows(conn)
+        blocked = conn.execute(
+            "SELECT COALESCE(SUM(blocked_count), 0) AS n FROM daily_totals"
+        ).fetchone()["n"]
+        unique_domains = conn.execute(
+            "SELECT COUNT(*) AS n FROM domain_totals"
+        ).fetchone()["n"]
+        unique_clients = conn.execute(
+            "SELECT COUNT(*) AS n FROM client_totals"
+        ).fetchone()["n"]
+    return {
+        "total_queries": total,
+        "blocked": blocked,
+        "blocked_pct": round((blocked / total) * 100, 1) if total else 0.0,
+        "unique_clients": unique_clients,
+        "unique_domains": unique_domains,
+    }
+
+
+def read_top_domains(client: str | None, limit: int) -> list[dict] | None:
+    """Serve db.top_domains(client, None, limit).
+
+    client is None -> rank domain_totals; the orphaned-domain rows across the
+    whole db are recovered as one {domain: None} group (total rows minus resolved
+    rows) and ranked alongside, exactly as the direct path folds all orphan ids
+    into one NULL group.
+
+    client is set -> rank that ip's rows from client_domain_rollup (built for
+    precisely this per-client top-domains case); its orphan group is that ip's
+    total rows (client_totals) minus its resolved-domain rows. An ip absent from
+    client_totals has zero rows -> [] (same as the direct path's unknown ip)."""
+    init_rollup_store()
+    with _connect() as conn:
+        if not _rollups_backfilled(conn):
+            return None
+        if client is None:
+            rows = conn.execute(
+                "SELECT domain, count FROM domain_totals"
+            ).fetchall()
+            resolved_sum = sum(r["count"] for r in rows)
+            orphan_n = _total_rows(conn) - resolved_sum
+        else:
+            rows = conn.execute(
+                "SELECT domain, count FROM client_domain_rollup WHERE ip = ?",
+                [client],
+            ).fetchall()
+            crow = conn.execute(
+                "SELECT count FROM client_totals WHERE ip = ?", [client]
+            ).fetchone()
+            client_total = crow["count"] if crow else 0
+            resolved_sum = sum(r["count"] for r in rows)
+            orphan_n = client_total - resolved_sum
+    out = [{"domain": r["domain"], "count": r["count"]} for r in rows]
+    if orphan_n > 0:
+        out.append({"domain": None, "count": orphan_n})
+    out.sort(key=lambda x: x["count"], reverse=True)
+    return out[:limit]
+
+
+def read_top_clients(limit: int) -> list[dict] | None:
+    """Serve db.top_clients(None, limit) from client_totals. Each row is already
+    one resolved ip (dup-ip ids merged at write time), so counts need no further
+    merge. Orphaned-client rows -- excluded from client_totals -- are recovered
+    as the single {ip: None, name: None} group the direct path emits (total rows
+    minus resolved-client rows). name mirrors the direct path's
+    `namemap.get(ip) or ip`: client_totals.name is that same network_addresses
+    name, so `name or ip` matches."""
+    init_rollup_store()
+    with _connect() as conn:
+        if not _rollups_backfilled(conn):
+            return None
+        rows = conn.execute(
+            "SELECT ip, count, name FROM client_totals"
+        ).fetchall()
+        orphan_n = _total_rows(conn) - sum(r["count"] for r in rows)
+    out = [
+        {"ip": r["ip"], "name": r["name"] or r["ip"], "count": r["count"]}
+        for r in rows
+    ]
+    if orphan_n > 0:
+        # Orphaned clients collapse to one None-ip group with a None name, exactly
+        # as the direct path's `namemap.get(None) or None` yields.
+        out.append({"ip": None, "name": None, "count": orphan_n})
+    out.sort(key=lambda x: x["count"], reverse=True)
+    return out[:limit]
+
+
+def read_query_types() -> list[dict] | None:
+    """Serve db.query_types(None, None, None) from query_type_totals. `type` is a
+    raw per-row column, so every row is counted under a resolvable type key --
+    there is no orphan case here. Output shape and desc-by-count ordering match
+    the direct path (ties, as in SQL's ORDER BY, are unordered among equals)."""
+    init_rollup_store()
+    with _connect() as conn:
+        if not _rollups_backfilled(conn):
+            return None
+        rows = conn.execute(
+            "SELECT type, count FROM query_type_totals"
+        ).fetchall()
+    out = [
+        {"type_code": r["type"], "type": db.type_name(r["type"]), "count": r["count"]}
+        for r in rows
+    ]
+    out.sort(key=lambda x: x["count"], reverse=True)
+    return out
