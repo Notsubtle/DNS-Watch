@@ -12,6 +12,13 @@ works on one schema fails loudly here:
     variant guards two regressions that only surfaced against a real DB snapshot:
     selecting `n.name` off a nameless `network` table (500s), and float-division
     time bucketing that zeroed every timeseries/sparkline bucket.
+  - "idstore": the NEWEST FTL "normalized" layout — `queries` is a VIEW over a real
+    `query_storage` table whose `domain`/`client` columns are integer IDs resolved
+    through `domain_by_id`/`client_by_id`, and the client name lives on
+    `network_addresses.name`. This is the shape the id-based aggregate fast path
+    (Schema.has_id_storage) targets. It deliberately includes a client whose ip
+    maps to TWO client_by_id ids (like 127.0.0.1 in a real snapshot) so the
+    group-by-id-then-merge-by-ip correctness path is actually exercised.
 """
 
 from __future__ import annotations
@@ -42,6 +49,94 @@ DOMAINS = ["ads.example.com", "cdn.site.net", "api.service.io",
 # 2/3 allowed (forwarded/cache), 1/5 blocked (gravity) — mix guarantees both.
 STATUSES = [2, 3, 1, 5, 2, 2, 3]
 TYPES = [1, 2, 16]  # A, AAAA, HTTPS
+
+
+# Extra client for the "idstore" schema: same ip as a duplicate, distinct name,
+# so it becomes a SECOND client_by_id id sharing one ip — the case that forces
+# the id-based fast path to merge by resolved ip rather than by raw id.
+IDSTORE_DUP_IP = "127.0.0.1"
+
+# Real Pi-hole v6 `queries` view over `query_storage` (verbatim shape).
+_QUERIES_VIEW_SQL = """
+CREATE VIEW queries AS SELECT id, timestamp, type, status,
+ CASE typeof(domain) WHEN 'integer' THEN (SELECT domain FROM domain_by_id d WHERE d.id = q.domain) ELSE domain END domain,
+ CASE typeof(client) WHEN 'integer' THEN (SELECT ip FROM client_by_id c WHERE c.id = q.client) ELSE client END client,
+ CASE typeof(forward) WHEN 'integer' THEN (SELECT forward FROM forward_by_id f WHERE f.id = q.forward) ELSE forward END forward,
+ CASE typeof(additional_info) WHEN 'integer' THEN (SELECT content FROM addinfo_by_id a WHERE a.id = q.additional_info) ELSE additional_info END additional_info,
+ reply_type, reply_time, dnssec, list_id, ede FROM query_storage q
+"""
+
+
+def _idstore_schema(c: sqlite3.Cursor) -> None:
+    """Create the normalized-layout tables + the `queries` view, faithful to a
+    real Pi-hole v6 on-disk DB."""
+    c.execute(
+        "CREATE TABLE query_storage (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "timestamp INTEGER NOT NULL, type INTEGER NOT NULL, status INTEGER NOT NULL, "
+        "domain INTEGER NOT NULL, client INTEGER NOT NULL, forward INTEGER, "
+        "additional_info INTEGER, reply_type INTEGER, reply_time REAL, dnssec INTEGER, "
+        "list_id INTEGER, ede INTEGER)"
+    )
+    c.execute("CREATE TABLE domain_by_id (id INTEGER PRIMARY KEY, domain TEXT NOT NULL)")
+    c.execute("CREATE UNIQUE INDEX domain_by_id_domain_idx ON domain_by_id(domain)")
+    c.execute("CREATE TABLE client_by_id (id INTEGER PRIMARY KEY, ip TEXT NOT NULL, name TEXT)")
+    c.execute("CREATE UNIQUE INDEX client_by_id_client_idx ON client_by_id(ip,name)")
+    # Referenced by the view's CASE arms; must exist even though we don't use them.
+    c.execute("CREATE TABLE forward_by_id (id INTEGER PRIMARY KEY, forward TEXT NOT NULL)")
+    c.execute("CREATE TABLE addinfo_by_id (id INTEGER PRIMARY KEY, type INTEGER, content TEXT)")
+    # Client name lives here (keyed by ip), NOT on client_by_id.name.
+    c.execute("CREATE TABLE network (id INTEGER PRIMARY KEY, hwaddr TEXT, macVendor TEXT)")
+    c.execute("CREATE TABLE network_addresses (network_id INTEGER, ip TEXT UNIQUE NOT NULL, "
+              "lastSeen INTEGER, name TEXT, nameUpdated INTEGER)")
+    c.execute("CREATE INDEX idx_queries_timestamp ON query_storage (timestamp)")
+    c.execute(_QUERIES_VIEW_SQL)
+
+
+def _idstore_domain_id(c: sqlite3.Cursor, domain: str) -> int:
+    row = c.execute("SELECT id FROM domain_by_id WHERE domain = ?", (domain,)).fetchone()
+    if row:
+        return row[0]
+    next_id = c.execute("SELECT COALESCE(MAX(id),0)+1 FROM domain_by_id").fetchone()[0]
+    c.execute("INSERT INTO domain_by_id (id, domain) VALUES (?,?)", (next_id, domain))
+    return next_id
+
+
+def _idstore_client_id(c: sqlite3.Cursor, ip: str, name: str | None) -> int:
+    """Get-or-create a client_by_id id for (ip, name), registering the ip's
+    display name on network_addresses (matching the real DB, where the name
+    comes from network_addresses, not client_by_id)."""
+    row = c.execute(
+        "SELECT id FROM client_by_id WHERE ip = ? AND name IS ?", (ip, name)
+    ).fetchone()
+    if row:
+        return row[0]
+    next_id = c.execute("SELECT COALESCE(MAX(id),0)+1 FROM client_by_id").fetchone()[0]
+    c.execute("INSERT INTO client_by_id (id, ip, name) VALUES (?,?,?)", (next_id, ip, name))
+    if not c.execute("SELECT 1 FROM network_addresses WHERE ip = ?", (ip,)).fetchone():
+        na_name = name if name else None
+        c.execute(
+            "INSERT INTO network_addresses (network_id, ip, lastSeen, name, nameUpdated) "
+            "VALUES (?,?,?,?,?)",
+            (next_id, ip, 0, na_name, 0),
+        )
+    return next_id
+
+
+def _build_idstore(c: sqlite3.Cursor, now: int, n: int) -> None:
+    """Shared-fixture normalized layout with exactly the 4 standard CLIENTS
+    (one client_by_id id each), so every existing count-based assertion stays
+    valid across schemas. The duplicate-ip / merge-by-ip edge case is
+    exercised separately in test_id_aggregates.py, which builds its own DB via
+    the `_idstore_*` helpers below."""
+    _idstore_schema(c)
+    std_ids = [_idstore_client_id(c, ip, name) for ip, name in CLIENTS]
+    for _ in range(n):
+        cid = random.choice(std_ids)
+        did = _idstore_domain_id(c, random.choice(DOMAINS))
+        c.execute(
+            "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (now - random.randint(0, 3600), random.choice(TYPES), random.choice(STATUSES), did, cid),
+        )
 
 
 def build_ftl(path: str, schema: str, n: int = 500, seed: int = 1) -> None:
@@ -84,6 +179,8 @@ def build_ftl(path: str, schema: str, n: int = 500, seed: int = 1) -> None:
                 (float(now - random.randint(0, 3600)) + random.random(), random.choice(TYPES),
                  random.choice(STATUSES), random.choice(DOMAINS), random.choice(CLIENTS)[0]),
             )
+    elif schema == "idstore":
+        _build_idstore(c, now, n)
     else:
         c.execute("CREATE TABLE queries (id INTEGER PRIMARY KEY, timestamp INTEGER, "
                   "type INTEGER, status INTEGER, domain TEXT, client TEXT)")
@@ -122,6 +219,22 @@ def add_client_with_hourly_pattern(
     now = now if now is not None else int(time.time())
     conn = sqlite3.connect(path)
     c = conn.cursor()
+
+    if schema == "idstore":
+        cid = _idstore_client_id(c, ip, name)
+        did = _idstore_domain_id(c, "steady.example.com")
+        n_hours = len(counts_per_hour)
+        for hour_idx, count in enumerate(counts_per_hour):
+            hour_start = now - (n_hours - hour_idx) * 3600
+            for _ in range(count):
+                ts = int(hour_start + random.uniform(0, 3599))
+                c.execute(
+                    "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                    (ts, 1, 2, did, cid),
+                )
+        conn.commit()
+        conn.close()
+        return
 
     if schema == "new":
         next_id = c.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM client").fetchone()[0]
@@ -172,6 +285,15 @@ def insert_queries_at_timestamp(path: str, schema: str, ts: float, n: int) -> li
     ids = []
     for i in range(n):
         domain = f"burst-{i}.example.com"
+        if schema == "idstore":
+            cid = _idstore_client_id(c, CLIENTS[0][0], CLIENTS[0][1])
+            did = _idstore_domain_id(c, domain)
+            c.execute(
+                "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                (ts, 1, 2, did, cid),
+            )
+            ids.append(c.lastrowid)
+            continue
         if schema == "new":
             c.execute(
                 "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,?)",
@@ -195,7 +317,7 @@ def truth(path: str):
     return conn
 
 
-@pytest.fixture(params=["new", "old", "real"])
+@pytest.fixture(params=["new", "old", "real", "idstore"])
 def ftl(request, tmp_path, monkeypatch):
     path = str(tmp_path / "pihole-FTL.db")
     build_ftl(path, request.param)

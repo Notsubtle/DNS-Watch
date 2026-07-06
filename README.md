@@ -263,12 +263,38 @@ Beyond the dashboard, three purpose-built views for digging into a specific ques
   misclassified, check Pi-hole's FTL changelog for new status codes and adjust that
   set — the raw `status` code is always shown alongside so you can spot mismatches.
 - Pi-hole's on-disk schema is auto-detected (`detect_schema()` in `server/app/db.py`)
-  so this works without configuration whether your FTL build has a `client_id` +
-  `client` table (v6) or a `queries.client` IP joined against `network`/
-  `network_addresses` (older builds, including the real v6 layout where the client
-  name lives on `network_addresses.name` rather than `network.name`). The test
-  suite's synthetic databases (`server/tests/conftest.py`) model all of these shapes
-  so a change that only works against one of them fails in CI.
+  so this works without configuration across FTL builds: a `client_id` + `client`
+  table (v6), a `queries.client` IP joined against `network`/`network_addresses`
+  (older builds, including the real v6 layout where the client name lives on
+  `network_addresses.name` rather than `network.name`), and the newest **normalized**
+  layout where `queries` is a *view* over a `query_storage` table whose
+  domain/client columns are integer IDs (resolved through `domain_by_id`/
+  `client_by_id`). On that normalized layout the dashboard's aggregate queries
+  (top domains/clients, summary, time-series, anomaly detection) group and filter
+  on the raw integer IDs and resolve names only for the rows actually shown, instead
+  of paying the view's per-row correlated subquery on a whole-table scan — same
+  results, much faster on large histories. The test suite's synthetic databases
+  (`server/tests/conftest.py`) model all of these shapes so a change that only works
+  against one of them fails in CI.
+- **Optional index for very large deployments.** On the normalized schema, if your
+  Pi-hole database has grown to millions of rows and *top domains* / *top clients*
+  over the "All" range still feel slow, you can add two indexes to your **own**
+  Pi-hole database for a large speedup on those two panels specifically:
+  ```sql
+  -- run against a COPY, or when FTL is stopped, at your own discretion
+  CREATE INDEX IF NOT EXISTS idx_qs_domain ON query_storage(domain);
+  CREATE INDEX IF NOT EXISTS idx_qs_client ON query_storage(client);
+  ```
+  In benchmarking this cut top-domains from a full scan to an index scan (~30x
+  faster at 40M rows). Caveats, so this isn't oversold: DNS Watch **does not create
+  these itself and does not require them** — its read-only design never modifies
+  Pi-hole's schema, and every panel is already correct and reasonably fast without
+  them. They don't help *every* query: they made the *client activity* sparkline
+  panel slightly **slower** in testing, and did **not** help the summary's
+  `COUNT(DISTINCT …)` at all. Indexes also add write cost and disk to Pi-hole's live
+  DB, so this is a deliberate opt-in for large installs, not a default. You can
+  re-verify any of these numbers at your own scale with
+  `server/tests/perf/bench_id_aggregates.py`.
 - This reads the DB directly rather than going through Pi-hole's API, so it works
   even if you've locked down Pi-hole's admin UI per the hardening guide.
 - SQLite read-only connections don't lock the file, so this has effectively zero

@@ -62,6 +62,13 @@ class Schema:
     # `network` table has no name column). Older builds we've seen put the name
     # on `network.name`. Detect which so the old-schema join reads the right one.
     na_has_name: bool = False
+    # Newest FTL ("normalized") layout: `queries` is a VIEW over the real
+    # `query_storage` table, and domain/client are stored as integer IDs
+    # resolved through `domain_by_id`/`client_by_id`. When present, aggregate
+    # queries can group/filter on the raw integer IDs directly instead of
+    # paying the view's per-row correlated subquery. Purely additive: older
+    # shapes (no query_storage) leave this False and behave exactly as before.
+    has_id_storage: bool = False
 
 
 def _connect() -> sqlite3.Connection:
@@ -78,7 +85,19 @@ def detect_schema() -> Schema:
         has_client_table = "client_id" in cols
         na_cols = {row["name"] for row in conn.execute("PRAGMA table_info(network_addresses)")}
         na_has_name = "name" in na_cols
-    return Schema(has_client_table=has_client_table, na_has_name=na_has_name)
+        # The normalized fast path requires all three real tables to be present.
+        # (`queries` itself is a VIEW in this layout; we detect the tables it
+        # reads from, not the view.)
+        tables = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        has_id_storage = {"query_storage", "domain_by_id", "client_by_id"}.issubset(tables)
+    return Schema(
+        has_client_table=has_client_table,
+        na_has_name=na_has_name,
+        has_id_storage=has_id_storage,
+    )
 
 
 def _client_join_sql() -> tuple[str, str]:
@@ -183,6 +202,121 @@ def _build_where(
         where.append("q.timestamp <= ?")
         params.append(until)
     status_pred = _status_where(status)
+    if status_pred:
+        where.append(status_pred)
+    return " AND ".join(where), params
+
+
+# --------------------------------------------------------------------------
+# Newer FTL ("normalized") fast path — see Schema.has_id_storage.
+#
+# In this layout `queries` is a VIEW over `query_storage`, and the view
+# resolves the integer domain/client IDs to text with a CORRELATED SUBQUERY
+# PER ROW (verified with EXPLAIN QUERY PLAN against a real snapshot). That is
+# fine for the small, recently-paged reads (list_queries/tail) but is exactly
+# what makes the whole-table AGGREGATES slow: they pay one subquery per
+# scanned row just to build a GROUP BY key. The functions below instead
+# GROUP/FILTER on the raw integer columns of `query_storage` and resolve
+# names only for the handful of rows actually returned.
+#
+# Correctness invariants (each verified against the real UAT snapshot):
+#   * domain_by_id.id is a PK and domain_by_id.domain is UNIQUE, so the
+#     id<->text mapping is a bijection. Grouping by the integer domain id is
+#     therefore identical to grouping by resolved text, including for
+#     COUNT(DISTINCT domain).
+#   * client_by_id is NOT injective on ip: two ids can map to the same ip
+#     (127.0.0.1 appears as id 2 AND id 3 in the real snapshot). The trusted
+#     view groups by *resolved ip*, so every client aggregate here groups by
+#     raw id first and MERGES by resolved ip in Python. Client cardinality is
+#     tiny (LAN devices), so this is cheap and exact.
+#   * client NAME comes from network_addresses.name keyed by ip — the same
+#     source the view-based path uses for this schema — not client_by_id.name.
+# --------------------------------------------------------------------------
+
+
+def _client_ids_for_ip(conn: sqlite3.Connection, ip: str) -> list[int]:
+    """Every client_by_id.id whose ip matches `ip` (usually one, but the ip
+    column is not unique — see module note above)."""
+    return [r["id"] for r in conn.execute("SELECT id FROM client_by_id WHERE ip = ?", [ip])]
+
+
+def _client_ip_map(conn: sqlite3.Connection) -> dict[int, str]:
+    return {r["id"]: r["ip"] for r in conn.execute("SELECT id, ip FROM client_by_id")}
+
+
+def _ids_for_ips(ipmap: dict[int, str], ips) -> list[int]:
+    """All client_by_id ids whose resolved ip is in `ips` (inverse of ipmap).
+    Used to translate a set of resolved ips back to every raw id that maps to
+    them, so a WHERE filter over query_storage covers all of a client's ids."""
+    wanted = set(ips)
+    return [cid for cid, ip in ipmap.items() if ip in wanted]
+
+
+def _client_name_map(conn: sqlite3.Connection) -> dict[str, str | None]:
+    """ip -> name, from network_addresses (the same source _client_join_sql's
+    na_has_name branch reads). ips absent here resolve to None, matching the
+    view path's LEFT JOIN."""
+    return {r["ip"]: r["name"] for r in conn.execute("SELECT ip, name FROM network_addresses")}
+
+
+def _resolve_domain_value(did, dmap: dict[int, str]):
+    """Mirror the view's `CASE typeof(domain) WHEN 'integer' THEN <lookup>
+    ELSE domain END`: integer ids resolve through domain_by_id (None if a
+    stored id is orphaned, exactly as the view's subquery yields NULL); a
+    value already stored as text resolves to itself."""
+    if isinstance(did, int):
+        return dmap.get(did)
+    return did
+
+
+def _resolve_client_value(cid, ipmap: dict[int, str]):
+    """Client analogue of _resolve_domain_value (see the view's CASE)."""
+    if isinstance(cid, int):
+        return ipmap.get(cid)
+    return cid
+
+
+def _resolve_domains(conn: sqlite3.Connection, ids: list) -> dict[int, str]:
+    int_ids = [i for i in ids if isinstance(i, int)]
+    if not int_ids:
+        return {}
+    ph = ",".join("?" for _ in int_ids)
+    return {
+        r["id"]: r["domain"]
+        for r in conn.execute(f"SELECT id, domain FROM domain_by_id WHERE id IN ({ph})", int_ids)
+    }
+
+
+def _id_where(
+    client_ids: list[int] | None = None,
+    since: int | None = None,
+    until: int | None = None,
+    status: str | None = None,
+) -> tuple[str, list]:
+    """WHERE builder for the raw `query_storage` table (aliased `q`).
+
+    Mirrors _build_where's semantics for the filters the rewritten aggregates
+    actually use (client, since, until, status). `client_ids` is the set of
+    client_by_id ids for a requested ip (may be several — see module note);
+    an empty list means "ip matched no known client" and yields no rows, the
+    same result the view path gives for `q.client = <unknown ip>`.
+    """
+    where = ["1=1"]
+    params: list = []
+    if client_ids is not None:
+        if not client_ids:
+            where.append("0")  # unknown ip -> match nothing
+        else:
+            ph = ",".join("?" for _ in client_ids)
+            where.append(f"q.client IN ({ph})")
+            params.extend(client_ids)
+    if since:
+        where.append("q.timestamp >= ?")
+        params.append(since)
+    if until:
+        where.append("q.timestamp <= ?")
+        params.append(until)
+    status_pred = _status_where(status)  # builds `q.status IN (...)` from fixed int sets
     if status_pred:
         where.append(status_pred)
     return " AND ".join(where), params
@@ -315,6 +449,8 @@ def count_queries(
 
 
 def summary(client: str | None, since: int | None, until: int | None) -> dict:
+    if detect_schema().has_id_storage:
+        return _summary_id(client, since, until)
     _, join = _client_join_sql()
     where_sql, params = _build_where(client=client, since=since, until=until)
     blocked_in = ",".join(str(s) for s in BLOCKED_STATUSES)
@@ -346,7 +482,50 @@ def summary(client: str | None, since: int | None, until: int | None) -> dict:
     }
 
 
+def _summary_id(client: str | None, since: int | None, until: int | None) -> dict:
+    """Fast path for summary. total/blocked/unique_domains come from a single
+    subquery-free scan of query_storage's raw columns. unique_domains is safe
+    on the raw id because domain_by_id is a bijection (distinct ids == distinct
+    texts). unique_clients CANNOT use COUNT(DISTINCT client) on the raw id --
+    two ids can share one ip -- so the distinct client ids are fetched (a tiny
+    set) and de-duplicated by resolved ip in Python, matching the view's
+    COUNT(DISTINCT resolved_ip)."""
+    blocked_in = ",".join(str(s) for s in BLOCKED_STATUSES)
+    with _connect() as conn:
+        client_ids = _client_ids_for_ip(conn, client) if client else None
+        where_sql, params = _id_where(client_ids=client_ids, since=since, until=until)
+        r = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN q.status IN ({blocked_in}) THEN 1 ELSE 0 END) AS blocked,
+                COUNT(DISTINCT q.domain) AS unique_domains
+            FROM query_storage q
+            WHERE {where_sql}
+            """,
+            params,
+        ).fetchone()
+        distinct_cids = conn.execute(
+            f"SELECT DISTINCT q.client AS cid FROM query_storage q WHERE {where_sql}",
+            params,
+        ).fetchall()
+        ipmap = _client_ip_map(conn)
+
+    total = r["total"] or 0
+    blocked = r["blocked"] or 0
+    unique_clients = len({_resolve_client_value(row["cid"], ipmap) for row in distinct_cids})
+    return {
+        "total_queries": total,
+        "blocked": blocked,
+        "blocked_pct": round((blocked / total) * 100, 1) if total else 0.0,
+        "unique_clients": unique_clients,
+        "unique_domains": r["unique_domains"] or 0,
+    }
+
+
 def top_domains(client: str | None, since: int | None, limit: int = 15) -> list[dict]:
+    if detect_schema().has_id_storage:
+        return _top_domains_id(client, since, limit)
     _, join = _client_join_sql()
     where_sql, params = _build_where(client=client, since=since)
 
@@ -365,7 +544,29 @@ def top_domains(client: str | None, since: int | None, limit: int = 15) -> list[
     return [{"domain": r["domain"], "count": r["n"]} for r in rows]
 
 
+def _top_domains_id(client: str | None, since: int | None, limit: int) -> list[dict]:
+    """Fast path: GROUP BY the raw integer domain id on query_storage, then
+    resolve only the top `limit` ids to text. domain_by_id is a bijection so
+    this is identical to the view-based grouping (see module note)."""
+    with _connect() as conn:
+        client_ids = _client_ids_for_ip(conn, client) if client else None
+        where_sql, params = _id_where(client_ids=client_ids, since=since)
+        sql = f"""
+            SELECT q.domain AS did, COUNT(*) AS n
+            FROM query_storage q
+            WHERE {where_sql}
+            GROUP BY q.domain
+            ORDER BY n DESC
+            LIMIT ?
+        """
+        rows = conn.execute(sql, [*params, limit]).fetchall()
+        dmap = _resolve_domains(conn, [r["did"] for r in rows])
+    return [{"domain": _resolve_domain_value(r["did"], dmap), "count": r["n"]} for r in rows]
+
+
 def top_clients(since: int | None, limit: int = 15) -> list[dict]:
+    if detect_schema().has_id_storage:
+        return _top_clients_id(since, limit)
     select, join = _client_join_sql()
     where_sql, params = _build_where(since=since)
 
@@ -387,8 +588,34 @@ def top_clients(since: int | None, limit: int = 15) -> list[dict]:
     ]
 
 
+def _top_clients_id(since: int | None, limit: int) -> list[dict]:
+    """Fast path: GROUP BY the raw integer client id (avoids resolving every
+    row's ip through the view's subquery), then MERGE by resolved ip. The
+    merge is essential: client_by_id is not injective on ip, so two ids can
+    map to one client and the trusted view groups by ip. Client cardinality
+    is tiny, so fetching every client group (no SQL LIMIT) then sorting in
+    Python is cheap and lets the merge happen before the top-N cut."""
+    with _connect() as conn:
+        where_sql, params = _id_where(since=since)
+        rows = conn.execute(
+            f"SELECT q.client AS cid, COUNT(*) AS n FROM query_storage q "
+            f"WHERE {where_sql} GROUP BY q.client",
+            params,
+        ).fetchall()
+        ipmap = _client_ip_map(conn)
+        namemap = _client_name_map(conn)
+    merged: dict = {}
+    for r in rows:
+        ip = _resolve_client_value(r["cid"], ipmap)
+        merged[ip] = merged.get(ip, 0) + r["n"]
+    ordered = sorted(merged.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    return [{"ip": ip, "name": namemap.get(ip) or ip, "count": n} for ip, n in ordered]
+
+
 def query_types(client: str | None, since: int | None, until: int | None = None) -> list[dict]:
     """Count of queries grouped by FTL query type, most frequent first."""
+    if detect_schema().has_id_storage:
+        return _query_types_id(client, since, until)
     _, join = _client_join_sql()
     where_sql, params = _build_where(client=client, since=since, until=until)
     sql = f"""
@@ -407,6 +634,23 @@ def query_types(client: str | None, since: int | None, until: int | None = None)
     ]
 
 
+def _query_types_id(client: str | None, since: int | None, until: int | None) -> list[dict]:
+    """Fast path: `type` is a raw column on query_storage, so the view's
+    per-row domain/client resolution was pure overhead here — group directly."""
+    with _connect() as conn:
+        client_ids = _client_ids_for_ip(conn, client) if client else None
+        where_sql, params = _id_where(client_ids=client_ids, since=since, until=until)
+        rows = conn.execute(
+            f"SELECT q.type AS type_code, COUNT(*) AS n FROM query_storage q "
+            f"WHERE {where_sql} GROUP BY q.type ORDER BY n DESC",
+            params,
+        ).fetchall()
+    return [
+        {"type_code": r["type_code"], "type": type_name(r["type_code"]), "count": r["n"]}
+        for r in rows
+    ]
+
+
 def timeseries(
     client: str | None,
     since: int | None,
@@ -419,6 +663,8 @@ def timeseries(
     a continuous chart without inferring gaps. When `since` is unknown (range
     "all"), the window is derived from the data's own min/max timestamp.
     """
+    if detect_schema().has_id_storage:
+        return _timeseries_id(client, since, until, buckets)
     _, join = _client_join_sql()
     blocked_in = ",".join(str(s) for s in BLOCKED_STATUSES)
     allowed_in = ",".join(str(s) for s in ALLOWED_STATUSES)
@@ -475,6 +721,62 @@ def timeseries(
     return {"since": win_since, "until": win_until, "bucket_seconds": width, "series": series}
 
 
+def _timeseries_id(
+    client: str | None, since: int | None, until: int | None, buckets: int
+) -> dict:
+    """Fast path for timeseries: identical bucketing/series assembly as the
+    view-based path, but bucketed/summed directly on query_storage's raw
+    timestamp/status columns (no per-row domain/client resolution). Only the
+    client filter needs id translation."""
+    blocked_in = ",".join(str(s) for s in BLOCKED_STATUSES)
+    allowed_in = ",".join(str(s) for s in ALLOWED_STATUSES)
+
+    with _connect() as conn:
+        client_ids = _client_ids_for_ip(conn, client) if client else None
+
+        win_until = until if until else int(time.time())
+        if since:
+            win_since = since
+        else:
+            base_where, base_params = _id_where(client_ids=client_ids, until=until)
+            row = conn.execute(
+                f"SELECT MIN(q.timestamp) AS mn FROM query_storage q WHERE {base_where}",
+                base_params,
+            ).fetchone()
+            win_since = row["mn"] if row and row["mn"] is not None else win_until
+
+        span = max(1, win_until - win_since)
+        buckets = max(1, min(buckets, 500))
+        width = max(1, span // buckets)
+
+        where_sql, params = _id_where(client_ids=client_ids, since=win_since, until=win_until)
+        sql = f"""
+            SELECT
+                CAST((q.timestamp - ?) / ? AS INTEGER) AS bucket,
+                SUM(CASE WHEN q.status IN ({allowed_in}) THEN 1 ELSE 0 END) AS allowed,
+                SUM(CASE WHEN q.status IN ({blocked_in}) THEN 1 ELSE 0 END) AS blocked,
+                COUNT(*) AS total
+            FROM query_storage q
+            WHERE {where_sql}
+            GROUP BY bucket
+            ORDER BY bucket
+        """
+        rows = conn.execute(sql, [win_since, width, *params]).fetchall()
+
+    by_bucket = {r["bucket"]: r for r in rows}
+    n = int((span // width)) + 1
+    series = []
+    for i in range(n):
+        r = by_bucket.get(i)
+        series.append({
+            "t": win_since + i * width,
+            "allowed": (r["allowed"] if r else 0) or 0,
+            "blocked": (r["blocked"] if r else 0) or 0,
+            "total": (r["total"] if r else 0) or 0,
+        })
+    return {"since": win_since, "until": win_until, "bucket_seconds": width, "series": series}
+
+
 def client_activity(
     since: int | None,
     until: int | None,
@@ -487,6 +789,8 @@ def client_activity(
     (not just the window), so the frontend can flag genuinely-new devices rather
     than ones that merely happen to be quiet earlier in the range.
     """
+    if detect_schema().has_id_storage:
+        return _client_activity_id(since, until, limit, buckets)
     select, join = _client_join_sql()
     ccol = _client_ip_col()
 
@@ -570,6 +874,101 @@ def client_activity(
             "count": t["n"],
             "first_seen": firsts.get(ip),
             "last_seen": t["last_seen"],
+            "sparkline": [bmap.get(i, 0) for i in range(n_buckets)],
+        })
+    return result
+
+
+def _client_activity_id(
+    since: int | None, until: int | None, limit: int, buckets: int
+) -> list[dict]:
+    """Fast path for client_activity. Same three-step shape as the view path
+    (top-N in window, global first-seen for those, sparkline buckets), but
+    grouped on the raw client id and MERGED by resolved ip at each step, so a
+    client seen under two ids stays a single row with summed counts, min
+    first-seen, max last-seen, and summed sparkline buckets — matching the
+    view's group-by-resolved-ip semantics."""
+    with _connect() as conn:
+        ipmap = _client_ip_map(conn)
+        namemap = _client_name_map(conn)
+
+        win_until = until if until else int(time.time())
+        if since:
+            win_since = since
+        else:
+            base_where, base_params = _id_where(until=until)
+            mn = conn.execute(
+                f"SELECT MIN(q.timestamp) AS mn FROM query_storage q WHERE {base_where}",
+                base_params,
+            ).fetchone()["mn"]
+            win_since = mn if mn is not None else win_until
+
+        span = max(1, win_until - win_since)
+        buckets = max(1, min(buckets, 200))
+        width = max(1, span // buckets)
+        n_buckets = int(span // width) + 1
+
+        where_sql, params = _id_where(since=win_since, until=win_until)
+        # 1) Per-id count/last_seen in the window, merged to per-ip.
+        raw_top = conn.execute(
+            f"""
+            SELECT q.client AS cid, COUNT(*) AS n, MAX(q.timestamp) AS last_seen
+            FROM query_storage q
+            WHERE {where_sql}
+            GROUP BY q.client
+            """,
+            params,
+        ).fetchall()
+        by_ip: dict = {}
+        for r in raw_top:
+            ip = _resolve_client_value(r["cid"], ipmap)
+            if ip in by_ip:
+                by_ip[ip]["n"] += r["n"]
+                by_ip[ip]["last_seen"] = max(by_ip[ip]["last_seen"], r["last_seen"])
+            else:
+                by_ip[ip] = {"n": r["n"], "last_seen": r["last_seen"]}
+        top = sorted(by_ip.items(), key=lambda kv: kv[1]["n"], reverse=True)[:limit]
+        if not top:
+            return []
+
+        top_ips = [ip for ip, _ in top]
+        ids = _ids_for_ips(ipmap, top_ips)
+        placeholders = ",".join("?" for _ in ids)
+
+        # 2) Global (unwindowed) first-seen for the selected clients' ids.
+        firsts: dict = {}
+        for r in conn.execute(
+            f"SELECT q.client AS cid, MIN(q.timestamp) AS fs FROM query_storage q "
+            f"WHERE q.client IN ({placeholders}) GROUP BY q.client",
+            ids,
+        ):
+            ip = _resolve_client_value(r["cid"], ipmap)
+            firsts[ip] = r["fs"] if ip not in firsts else min(firsts[ip], r["fs"])
+
+        # 3) Sparkline buckets, merged per (ip, bucket).
+        spark_by_ip: dict = {}
+        for r in conn.execute(
+            f"""
+            SELECT q.client AS cid, CAST((q.timestamp - ?) / ? AS INTEGER) AS bucket, COUNT(*) AS n
+            FROM query_storage q
+            WHERE {where_sql} AND q.client IN ({placeholders})
+            GROUP BY q.client, bucket
+            """,
+            [win_since, width, *params, *ids],
+        ):
+            ip = _resolve_client_value(r["cid"], ipmap)
+            b = spark_by_ip.setdefault(ip, {})
+            b[r["bucket"]] = b.get(r["bucket"], 0) + r["n"]
+
+    result = []
+    for ip, agg in top:
+        bmap = spark_by_ip.get(ip, {})
+        result.append({
+            "ip": ip,
+            "name": namemap.get(ip) or ip,
+            "count": agg["n"],
+            "first_seen": firsts.get(ip),
+            "last_seen": agg["last_seen"],
             "sparkline": [bmap.get(i, 0) for i in range(n_buckets)],
         })
     return result
@@ -723,6 +1122,8 @@ def new_clients(after_ts: int) -> list[dict]:
     that genuinely appeared for the first time in the window — the signal the
     new-device alert rule keys on.
     """
+    if detect_schema().has_id_storage:
+        return _new_clients_id(after_ts)
     select, join = _client_join_sql()
     ccol = _client_ip_col()
     sql = f"""
@@ -744,6 +1145,35 @@ def new_clients(after_ts: int) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def _new_clients_id(after_ts: int) -> list[dict]:
+    """Fast path: MIN(timestamp)/COUNT grouped on the raw client id (no per-row
+    ip subquery), then MERGE by resolved ip before applying the first-seen
+    cutoff. Merging first is required for correctness: a client seen under two
+    ids has one true global first-seen (the min across both) and one total."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT q.client AS cid, MIN(q.timestamp) AS fs, COUNT(*) AS total "
+            "FROM query_storage q GROUP BY q.client"
+        ).fetchall()
+        ipmap = _client_ip_map(conn)
+        namemap = _client_name_map(conn)
+    merged: dict = {}
+    for r in rows:
+        ip = _resolve_client_value(r["cid"], ipmap)
+        if ip in merged:
+            fs, total = merged[ip]
+            merged[ip] = (min(fs, r["fs"]), total + r["total"])
+        else:
+            merged[ip] = (r["fs"], r["total"])
+    out = [
+        {"ip": ip, "name": namemap.get(ip) or ip, "first_seen": fs, "total": total}
+        for ip, (fs, total) in merged.items()
+        if fs >= after_ts
+    ]
+    out.sort(key=lambda c: c["first_seen"], reverse=True)
+    return out
 
 
 TOP_DOMAINS_LIMIT = 50  # how many matched domains the breakdown returns
@@ -881,6 +1311,99 @@ SPIKE_STDDEV_MULTIPLIER = 3.0
 NEW_DEVICE_GRACE_SECONDS = 24 * 3600
 
 
+def _anomaly_inputs(
+    now: int, baseline_start: int
+) -> tuple[dict[str, dict[int, int]], dict[str, int], dict[str, str]]:
+    """Fetch the (per-client hourly buckets, windowed first-seen, names) that
+    detect_anomalies analyses. Two implementations with identical outputs:
+    the view path (correlated per-row resolution) and the id path (group on
+    raw client id, merge by resolved ip).
+
+    "First-seen" here is deliberately the earliest row WITHIN the baseline
+    window, not the client's true all-time first query (which would cost an
+    extra unwindowed full-table scan, ~0.7s on the real snapshot). It's
+    equivalent for both uses downstream: eligibility (`now - fs < 24h`) — a
+    client active before the window has a windowed fs at/near baseline_start,
+    always >24h old, same conclusion as the true value; and clamping
+    (`max(baseline_start, fs)`) — a client whose true first query is within
+    the window has an unchanged windowed fs, and an older client collapses to
+    ≈baseline_start either way, exactly what the clamp resolves to. (Accepted
+    edge case: a client active long ago, silent >7 days, then active again in
+    the window reads as "new" rather than "returning" — fine, it has no useful
+    recent baseline anyway.)
+    """
+    if not detect_schema().has_id_storage:
+        ccol = _client_ip_col()
+        _, join = _client_join_sql()
+        with _connect() as conn:
+            bucket_rows = conn.execute(
+                f"""
+                SELECT {ccol} AS ip,
+                       CAST((q.timestamp - ?) / 3600 AS INTEGER) AS bucket,
+                       COUNT(*) AS n
+                FROM queries q
+                {join}
+                WHERE q.timestamp >= ? AND q.timestamp <= ?
+                GROUP BY ip, bucket
+                """,
+                [baseline_start, baseline_start, now],
+            ).fetchall()
+            select, _ = _client_join_sql()
+            first_seen_rows = conn.execute(
+                f"""
+                SELECT {select}, MIN(q.timestamp) AS fs
+                FROM queries q
+                {join}
+                WHERE q.timestamp >= ?
+                GROUP BY {ccol}
+                """,
+                [baseline_start],
+            ).fetchall()
+        first_seen = {r["client_ip"]: r["fs"] for r in first_seen_rows}
+        names = {r["client_ip"]: (r["client_name"] or r["client_ip"]) for r in first_seen_rows}
+        per_client_buckets: dict[str, dict[int, int]] = {}
+        for r in bucket_rows:
+            per_client_buckets.setdefault(r["ip"], {})[r["bucket"]] = r["n"]
+        return per_client_buckets, first_seen, names
+
+    # Id fast path: group on the raw client id (no per-row ip subquery) and
+    # merge by resolved ip, so a client seen under two ids sums its buckets,
+    # takes the min first-seen, and appears once — matching the view.
+    with _connect() as conn:
+        ipmap = _client_ip_map(conn)
+        namemap = _client_name_map(conn)
+        bucket_rows = conn.execute(
+            """
+            SELECT q.client AS cid,
+                   CAST((q.timestamp - ?) / 3600 AS INTEGER) AS bucket,
+                   COUNT(*) AS n
+            FROM query_storage q
+            WHERE q.timestamp >= ? AND q.timestamp <= ?
+            GROUP BY q.client, bucket
+            """,
+            [baseline_start, baseline_start, now],
+        ).fetchall()
+        first_seen_rows = conn.execute(
+            "SELECT q.client AS cid, MIN(q.timestamp) AS fs FROM query_storage q "
+            "WHERE q.timestamp >= ? GROUP BY q.client",
+            [baseline_start],
+        ).fetchall()
+
+    per_client_buckets = {}
+    for r in bucket_rows:
+        ip = _resolve_client_value(r["cid"], ipmap)
+        b = per_client_buckets.setdefault(ip, {})
+        b[r["bucket"]] = b.get(r["bucket"], 0) + r["n"]
+
+    first_seen = {}
+    for r in first_seen_rows:
+        ip = _resolve_client_value(r["cid"], ipmap)
+        first_seen[ip] = r["fs"] if ip not in first_seen else min(first_seen[ip], r["fs"])
+
+    names = {ip: (namemap.get(ip) or ip) for ip in first_seen}
+    return per_client_buckets, first_seen, names
+
+
 def detect_anomalies() -> list[dict]:
     """Flag clients whose recent query volume deviates from their own 7-day
     hourly baseline: gone silent, or spiking. Fixed thresholds (module
@@ -902,63 +1425,7 @@ def detect_anomalies() -> list[dict]:
     recent_start_bucket = (baseline_end - baseline_start) // 3600
     total_hours = recent_start_bucket + SILENT_WINDOW_HOURS
 
-    ccol = _client_ip_col()
-    _, join = _client_join_sql()
-    # `join` is a single JOIN against the small client-identity table (once,
-    # as part of this one query's plan) — not the same cost as the per-client
-    # WHERE-filtered scans this replaced. Still one pass over the
-    # timestamp-indexed range regardless of client count.
-
-    with _connect() as conn:
-        bucket_rows = conn.execute(
-            f"""
-            SELECT {ccol} AS ip,
-                   CAST((q.timestamp - ?) / 3600 AS INTEGER) AS bucket,
-                   COUNT(*) AS n
-            FROM queries q
-            {join}
-            WHERE q.timestamp >= ? AND q.timestamp <= ?
-            GROUP BY ip, bucket
-            """,
-            [baseline_start, baseline_start, now],
-        ).fetchall()
-        # "First-seen" here deliberately means "earliest row within the
-        # baseline window", NOT the client's true all-time first query — an
-        # unwindowed full-table scan measured ~0.7s on its own against the
-        # real Cube1 snapshot, and it turns out to be unnecessary: every use
-        # below only ever compares this value against baseline_start/now, and
-        # for both uses, a windowed earliest-row is functionally equivalent
-        # to the true value clamped at baseline_start:
-        #   - eligibility (`now - fs < 24h`) — a client active before the
-        #     window has a windowed `fs` at/near baseline_start, which is
-        #     always > 24h old, same conclusion as the true value.
-        #   - clamping (`max(baseline_start, fs)`) — a client whose true
-        #     first-ever query is within the window has a windowed `fs`
-        #     equal to the true value (nothing before it was excluded); a
-        #     client older than the window collapses to ≈baseline_start
-        #     either way, which is exactly what the clamp resolves to anyway.
-        # (One accepted edge case: a client active long ago, then fully
-        # silent for over 7 days, then newly active again within the window
-        # reads as "new" here instead of "returning" — reasonable, since it
-        # has no useful recent baseline to compare against either way.)
-        select, _ = _client_join_sql()
-        first_seen_rows = conn.execute(
-            f"""
-            SELECT {select}, MIN(q.timestamp) AS fs
-            FROM queries q
-            {join}
-            WHERE q.timestamp >= ?
-            GROUP BY {ccol}
-            """,
-            [baseline_start],
-        ).fetchall()
-
-    first_seen = {r["client_ip"]: r["fs"] for r in first_seen_rows}
-    names = {r["client_ip"]: (r["client_name"] or r["client_ip"]) for r in first_seen_rows}
-
-    per_client_buckets: dict[str, dict[int, int]] = {}
-    for r in bucket_rows:
-        per_client_buckets.setdefault(r["ip"], {})[r["bucket"]] = r["n"]
+    per_client_buckets, first_seen, names = _anomaly_inputs(now, baseline_start)
 
     anomalies: list[dict] = []
     for ip, buckets in per_client_buckets.items():
