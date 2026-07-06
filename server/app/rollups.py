@@ -54,17 +54,30 @@ aggregate paths handle them:
     mechanically broken (SQLite ON CONFLICT never dedupes NULL keys, so N
     orphan ids would fail to merge into one row).
 
+DRIFT / RECONCILIATION
+----------------------
+refresh_rollups only ever ADDS the deltas of rows newer than its cursor; it has
+no signal for rows Pi-hole PRUNES on its own retention schedule (maxDBdays). So
+over time the rollup totals drift upward relative to what's actually still in
+Pi-hole's db -- an explicit, disclosed tradeoff: detecting/reversing individual
+deletions would require the per-row history this rollup deliberately doesn't
+keep. reconcile_rollups() corrects that drift by a rare (default: daily) full
+rebuild from scratch, reusing the exact same incremental mechanism as the
+initial backfill (see reconcile_rollups' own docstring for the safe-rebuild
+design and why in-place truncate is correct here).
+
 SCOPE
 -----
-This module is ONLY the schema + the core incremental-update function. Wiring
-it into the alert-eval tick, the one-time backfill, daily reconciliation, and
-the dashboard read paths are separate, later tasks -- intentionally not here.
+This module is the rollup schema, the core incremental-update function, and the
+periodic full reconciliation. Wiring the dashboard READ paths onto these tables
+is still a separate, later task -- intentionally not here.
 """
 
 from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 
 from app import db
@@ -145,9 +158,37 @@ def init_rollup_store() -> None:
             );
             INSERT OR IGNORE INTO rollup_cursor (id, last_query_id, last_query_timestamp)
                 VALUES (1, NULL, NULL);
+            -- Reconciliation clock, kept in its OWN single-row state table rather
+            -- than as a column on rollup_cursor. The two have distinct lifetimes:
+            -- reconcile_rollups REWINDS the cursor to NULL on every run, but the
+            -- last-reconciled stamp must SURVIVE that rewind (it records when the
+            -- last full rebuild finished, not what's been processed). Separating
+            -- them keeps each table single-purpose, removes the footgun of a
+            -- cursor reset accidentally clearing the clock, and needs no ALTER
+            -- migration on stores created before this column existed -- it's a
+            -- plain CREATE IF NOT EXISTS, matching this codebase's no-migration
+            -- convention (alerts.init_store, and the cursor table above).
+            CREATE TABLE IF NOT EXISTS rollup_meta (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                last_reconciled_at REAL
+            );
+            INSERT OR IGNORE INTO rollup_meta (id, last_reconciled_at)
+                VALUES (1, NULL);
             """
         )
         conn.commit()
+
+
+# Every table reconcile_rollups clears before a full rebuild. Module-level (not
+# caller input) so it's safe to interpolate into the DELETE statements below.
+_ROLLUP_TABLES = (
+    "domain_totals",
+    "client_totals",
+    "query_type_totals",
+    "daily_totals",
+    "client_domain_rollup",
+    "client_activity_rollup",
+)
 
 
 # Sentinel used when the cursor has never advanced. Real Pi-hole timestamps and
@@ -414,3 +455,112 @@ def refresh_rollups(batch_size: int = DEFAULT_BATCH_SIZE) -> dict:
     finally:
         read_conn.close()
     return {"processed": processed, "batches": batches}
+
+
+def _read_last_reconciled(conn: sqlite3.Connection) -> float | None:
+    row = conn.execute(
+        "SELECT last_reconciled_at FROM rollup_meta WHERE id = 1"
+    ).fetchone()
+    if row is None or row["last_reconciled_at"] is None:
+        return None
+    return float(row["last_reconciled_at"])
+
+
+def reconcile_rollups(interval_seconds: int = 86400, force: bool = False) -> dict:
+    """Periodically rebuild the rollup tables from scratch to erase the upward
+    drift refresh_rollups can't correct on its own (Pi-hole prunes old rows on
+    its retention schedule; refresh only ever ADDS newer rows -- see the module
+    docstring's DRIFT section).
+
+    Gating: a no-op unless `force`, or at least `interval_seconds` have elapsed
+    since the last successful reconciliation (an unset stamp == "never
+    reconciled" == do it now). Cheap to call every scheduler tick -- the common
+    path is a single indexed read of the meta row.
+
+    SAFE-REBUILD DESIGN (in-place truncate, deliberately chosen over a
+    temp-table swap):
+
+      The rebuild clears all six rollup tables and rewinds the cursor to
+      "nothing processed" in ONE transaction, then calls refresh_rollups() to
+      re-drain the whole Pi-hole table via the exact same per-batch mechanism as
+      the initial backfill. Two properties make this correct and crash-safe
+      WITHOUT a swap:
+
+        * Atomic reset. The truncate + cursor-rewind commit together, so a crash
+          can never leave tables cleared but the cursor still advanced (which
+          would silently skip rows on the next refresh) or vice-versa.
+
+        * Self-healing rebuild. refresh_rollups advances the cursor in the SAME
+          transaction as each batch's deltas. A crash mid-rebuild therefore
+          leaves a consistent partial state that the NEXT refresh_rollups
+          continues from and completes correctly -- totals are never permanently
+          wrong. `last_reconciled_at` is stamped only AFTER the rebuild returns,
+          so an interrupted run simply reconciles again next tick.
+
+      A temp-table-into-atomic-swap design would additionally guarantee that a
+      concurrent READER never observes the tables mid-rebuild (empty then
+      climbing for the ~8s a full rebuild takes at real scale). That guarantee
+      is deliberately NOT built here, for concrete structural reasons rather than
+      to save effort:
+
+        1. Nothing reads these tables yet -- the dashboard read path is a
+           separate, later task -- so there is no reader to protect today.
+        2. This store file is SHARED with alerts.py's rule/event/settings
+           tables, so a whole-file swap (build a sibling db, os.replace it in) is
+           out -- it would clobber unrelated state.
+        3. A same-file shadow-table swap (build into `*_new` tables, RENAME them
+           over the live ones in one txn) would force refresh_rollups to write to
+           a configurable table namespace and cursor -- i.e. parameterizing the
+           one component already verified at 764k-row scale -- for a benefit no
+           current consumer can observe. The task's own constraint is to reuse
+           refresh_rollups' batch/transaction logic verbatim, not fork it.
+
+      The right time to add zero-window swap semantics is WHEN the read path is
+      built, designed together with it (e.g. switch this store to WAL so a single
+      long rebuild txn lets readers keep seeing the last committed snapshot, or
+      add shadow tables and a read indirection as one unit). Pre-building that
+      machinery now would be speculative complexity around the most
+      correctness-sensitive code in the module. This deferral is intentional and
+      flagged, not an oversight.
+    """
+    init_rollup_store()
+    now = time.time()
+    with _connect() as conn:
+        last = _read_last_reconciled(conn)
+
+    if not force and last is not None and (now - last) < interval_seconds:
+        return {
+            "reconciled": False,
+            "last_reconciled_at": last,
+            "seconds_until_due": interval_seconds - (now - last),
+        }
+
+    # Atomic reset: clear every rollup table AND rewind the cursor together, so
+    # the "nothing processed" state is all-or-nothing (see docstring).
+    with _connect() as conn:
+        conn.execute("BEGIN")
+        for table in _ROLLUP_TABLES:
+            conn.execute(f"DELETE FROM {table}")  # noqa: S608 — table names are module constants
+        conn.execute(
+            "UPDATE rollup_cursor SET last_query_id = NULL, last_query_timestamp = NULL "
+            "WHERE id = 1"
+        )
+        conn.commit()
+
+    # Rebuild from scratch using the SAME incremental drain as the initial
+    # backfill -- not a reimplementation of it.
+    result = refresh_rollups()
+
+    # Stamp completion only after a fully successful rebuild, so an interrupted
+    # run leaves the old stamp and reconciles again next tick.
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE rollup_meta SET last_reconciled_at = ? WHERE id = 1", [now]
+        )
+        conn.commit()
+
+    return {
+        "reconciled": True,
+        "processed": result["processed"],
+        "batches": result["batches"],
+    }
