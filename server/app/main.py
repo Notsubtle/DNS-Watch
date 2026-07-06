@@ -18,7 +18,7 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import alerts, db
+from app import alerts, db, rollups
 
 # How often the server evaluates alert rules on its own, independent of any open
 # dashboard. This is what makes alerting/webhooks work headless. Set to 0 to
@@ -33,6 +33,14 @@ def _alert_scheduler() -> None:
         try:
             alerts.evaluate()
         except Exception:  # noqa: BLE001 — never let the loop die on a transient error
+            pass
+        try:
+            # Piggyback the rollup-cache refresh on this same tick rather than
+            # running a second recurring timer — each refresh only processes
+            # rows newer than its cursor, so this stays cheap regardless of
+            # total table size (see app/rollups.py).
+            rollups.refresh_rollups()
+        except Exception:  # noqa: BLE001 — a rollup hiccup must not kill alerting
             pass
         _scheduler_stop.wait(ALERT_EVAL_INTERVAL)
 
