@@ -433,6 +433,17 @@ def refresh_rollups(batch_size: int = DEFAULT_BATCH_SIZE) -> dict:
     read_conn = db._connect()
     try:
         with _connect() as write_conn:
+            # A from-scratch drain (cursor still at the "nothing processed"
+            # sentinel) happens in exactly two cases: true first boot, or
+            # reconcile_rollups() rewinding the cursor before rebuilding. Either
+            # way, once it fully completes that IS a fresh reconciliation by
+            # definition -- see the stamp below, which fixes #3 (the redundant
+            # double-backfill reconcile_rollups() would otherwise immediately
+            # trigger on the same scheduler tick, since an unset stamp reads as
+            # "never reconciled, do it now").
+            started_ts, started_id = _read_cursor(write_conn)
+            started_empty = started_ts == _CURSOR_START_TS and started_id == _CURSOR_START_ID
+
             while True:
                 since_ts, since_id = _read_cursor(write_conn)
                 rows = _fetch_batch(read_conn, since_ts, since_id, batch_size)
@@ -454,6 +465,13 @@ def refresh_rollups(batch_size: int = DEFAULT_BATCH_SIZE) -> dict:
                 batches += 1
                 if len(rows) < batch_size:
                     break
+
+            if started_empty:
+                write_conn.execute(
+                    "UPDATE rollup_meta SET last_reconciled_at = ? WHERE id = 1",
+                    [time.time()],
+                )
+                write_conn.commit()
     finally:
         read_conn.close()
     return {"processed": processed, "batches": batches}

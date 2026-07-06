@@ -372,6 +372,26 @@ def test_reconcile_interval_gating_and_force(idb, rstore):
     assert rollups.reconcile_rollups(interval_seconds=0)["reconciled"] is True
 
 
+def test_first_boot_refresh_does_not_trigger_immediate_reconcile(ftl, rstore):
+    """#3: a from-scratch refresh_rollups() (true first boot, cursor never
+    initialized) must stamp last_reconciled_at itself, so the very next
+    reconcile_rollups() call in the same scheduler tick sees a fresh stamp and
+    no-ops instead of immediately redoing the exact same full backfill."""
+    first = rollups.refresh_rollups()
+    assert first["processed"] > 0  # the ftl fixture always has queries
+
+    conn = sqlite3.connect(rstore)
+    conn.row_factory = sqlite3.Row
+    meta = conn.execute("SELECT last_reconciled_at FROM rollup_meta WHERE id = 1").fetchone()
+    conn.close()
+    assert meta["last_reconciled_at"] is not None
+
+    # Same tick, immediately after: must be a no-op, not a second full backfill.
+    again = rollups.reconcile_rollups()
+    assert again["reconciled"] is False
+    assert "seconds_until_due" in again
+
+
 def test_reconcile_matches_a_from_empty_refresh(idb, rstore):
     """A forced reconcile with no pruning must land on the identical state a
     single from-empty refresh_rollups produces -- confirming reconcile reuses
