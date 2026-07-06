@@ -279,3 +279,112 @@ def test_small_batch_size_drains_completely(idb, rstore):
     res = rollups.refresh_rollups(batch_size=137)
     assert res["batches"] > 1
     _assert_matches(_rollup_state(rstore), _expected_from_view(idb))
+
+
+# --------------------------------------------------------------------------
+# Reconciliation: the drift-and-correct property.
+#
+# refresh_rollups only ever ADDS rows above its cursor, so when Pi-hole prunes
+# old rows on its retention schedule the rollup totals drift upward and refresh
+# alone can never pull them back down. reconcile_rollups rebuilds from scratch
+# and erases that drift. These tests prove the drift is real (not accidentally
+# already handled) AND that reconciliation removes it exactly.
+# --------------------------------------------------------------------------
+
+
+def _remaining_row_count(path: str) -> int:
+    conn = sqlite3.connect(path)
+    n = conn.execute("SELECT COUNT(*) FROM query_storage").fetchone()[0]
+    conn.close()
+    return n
+
+
+def test_reconcile_corrects_pruning_drift(idb, rstore):
+    """Build a rollup, prune old rows from Pi-hole's underlying table, prove
+    refresh_rollups does NOT correct the pruned rows' contribution (drift is
+    real), then prove reconcile_rollups(force=True) rebuilds to exactly match a
+    fresh full computation over the now-smaller dataset."""
+    _build_idstore_with_traps(idb, _NOW - 10 * 86400, _NOW)
+    rollups.refresh_rollups()
+
+    before = _rollup_state(rstore)
+    full_before = _expected_from_view(idb)
+    _assert_matches(before, full_before)  # sanity: rollup == full data initially
+
+    # Simulate Pi-hole's maxDBdays retention pruning: delete the oldest rows.
+    cutoff = _NOW - 6 * 86400
+    conn = sqlite3.connect(idb)
+    deleted = conn.execute(
+        "DELETE FROM query_storage WHERE timestamp < ?", (cutoff,)
+    ).rowcount
+    conn.commit()
+    conn.close()
+    assert deleted > 0  # the prune actually removed rows
+
+    # refresh_rollups alone is a NO-OP here: the deleted rows are all BELOW the
+    # cursor's high-water mark, and refresh only reads rows above it. So the
+    # rollup keeps counting rows that no longer exist -- the drift.
+    assert rollups.refresh_rollups() == {"processed": 0, "batches": 0}
+
+    drifted = _rollup_state(rstore)
+    full_after = _expected_from_view(idb)
+
+    # The drifted rollup still holds the PRE-prune totals ...
+    assert sum(drifted["qtype"].values()) == sum(before["qtype"].values())
+    # ... which are strictly larger than the current (pruned) reality ...
+    assert sum(drifted["qtype"].values()) > sum(full_after["qtype"].values())
+    assert sum(drifted["qtype"].values()) - sum(full_after["qtype"].values()) == deleted
+    # ... i.e. the rollup no longer matches the actual dataset (drift confirmed).
+    with pytest.raises(AssertionError):
+        _assert_matches(drifted, full_after)
+
+    # Reconcile: rebuild from scratch and re-drain the (smaller) table.
+    res = rollups.reconcile_rollups(force=True)
+    assert res["reconciled"] is True
+    assert res["processed"] == _remaining_row_count(idb)
+    assert res["batches"] >= 1
+
+    # Drift is gone: the rollup now matches a fresh full computation exactly,
+    # across every table (totals, per-domain, per-client, daily, cross rollups).
+    _assert_matches(_rollup_state(rstore), full_after)
+
+
+def test_reconcile_interval_gating_and_force(idb, rstore):
+    """No-op inside the interval, forced past it, and unset == 'never
+    reconciled, do it now'."""
+    _build_idstore_with_traps(idb, _NOW - 5 * 86400, _NOW)
+
+    # Never reconciled -> the first (unforced, default-interval) call runs.
+    first = rollups.reconcile_rollups()
+    assert first["reconciled"] is True
+    assert first["processed"] == _remaining_row_count(idb)
+
+    # Immediately again, well within the default 1-day interval -> no-op.
+    again = rollups.reconcile_rollups()
+    assert again["reconciled"] is False
+    assert "seconds_until_due" in again
+
+    # force=True bypasses the interval check entirely.
+    forced = rollups.reconcile_rollups(force=True)
+    assert forced["reconciled"] is True
+
+    # interval_seconds=0 -> the interval has always "elapsed" -> runs.
+    assert rollups.reconcile_rollups(interval_seconds=0)["reconciled"] is True
+
+
+def test_reconcile_matches_a_from_empty_refresh(idb, rstore):
+    """A forced reconcile with no pruning must land on the identical state a
+    single from-empty refresh_rollups produces -- confirming reconcile reuses
+    the same drain rather than a divergent rebuild path."""
+    _build_idstore_with_traps(idb, _NOW - 5 * 86400, _NOW)
+    rollups.refresh_rollups()
+    baseline = _rollup_state(rstore)
+
+    res = rollups.reconcile_rollups(force=True)
+    assert res["reconciled"] is True
+
+    after = _rollup_state(rstore)
+    # Cursor differs only in identity of the row; the aggregates must be identical.
+    for key in ("domain", "qtype", "daily", "client_domain", "client_activity"):
+        assert after[key] == baseline[key]
+    assert after["client"] == baseline["client"]
