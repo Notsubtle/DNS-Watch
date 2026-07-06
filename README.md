@@ -276,6 +276,23 @@ Beyond the dashboard, three purpose-built views for digging into a specific ques
   results, much faster on large histories. The test suite's synthetic databases
   (`server/tests/conftest.py`) model all of these shapes so a change that only works
   against one of them fails in CI.
+- **Rollup cache for the "All" time range.** Even with the ID-based rewrite above,
+  whole-table aggregates (summary, top domains/clients, query-type breakdown) over
+  **unbounded** history don't scale forever — a benchmark showed 13–32+ seconds at a
+  simulated small-business/full-year scale (~40M rows), since there's no index we can
+  add to Pi-hole's read-only database. `server/app/rollups.py` maintains small,
+  precomputed rollup tables in DNS Watch's **own** writable database, updated
+  incrementally (only rows added since the last update, never a full re-scan) on the
+  same background timer that already evaluates alert rules — not a second recurring
+  job. A rare (default: daily) full reconciliation pass corrects the gradual drift
+  that's an inherent property of an add-only rollup once Pi-hole prunes its own old
+  rows; this means "All" reflects reality within a disclosed staleness window (up to
+  ~24h around a prune), not perfectly to-the-second — a deliberate tradeoff for
+  turning a 13–32 second query into a sub-10-millisecond one. Bounded ranges
+  (15m/1h/24h/7d) are untouched by any of this; they were already fast. Timeseries and
+  the per-client activity chart aren't wired into the rollup cache yet — their bucket
+  boundaries don't cleanly map to the rollup's day-granularity — so those two still
+  use the (correct, just not rollup-accelerated) direct scan for "All".
 - **Optional index for very large deployments.** On the normalized schema, if your
   Pi-hole database has grown to millions of rows and *top domains* / *top clients*
   over the "All" range still feel slow, you can add two indexes to your **own**
@@ -294,7 +311,10 @@ Beyond the dashboard, three purpose-built views for digging into a specific ques
   `COUNT(DISTINCT …)` at all. Indexes also add write cost and disk to Pi-hole's live
   DB, so this is a deliberate opt-in for large installs, not a default. You can
   re-verify any of these numbers at your own scale with
-  `server/tests/perf/bench_id_aggregates.py`.
+  `server/tests/perf/bench_id_aggregates.py`. In practice, the rollup cache above now
+  serves top domains/clients for the "All" range directly from DNS Watch's own
+  database, so this manual index mainly still matters for very large *bounded*
+  ranges or before the rollup's first backfill completes.
 - This reads the DB directly rather than going through Pi-hole's API, so it works
   even if you've locked down Pi-hole's admin UI per the hardening guide.
 - SQLite read-only connections don't lock the file, so this has effectively zero
