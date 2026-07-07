@@ -18,7 +18,7 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import alerts, db, rollups
+from app import alerts, db, resolve, rollups
 
 # How often the server evaluates alert rules on its own, independent of any open
 # dashboard. This is what makes alerting/webhooks work headless. Set to 0 to
@@ -52,6 +52,14 @@ def _alert_scheduler() -> None:
             # alerting or the incremental refresh — same contract as the two above.
             rollups.reconcile_rollups()
         except Exception:  # noqa: BLE001 — a reconciliation hiccup must not kill the loop
+            pass
+        try:
+            # Piggyback active reverse-DNS resolution (issue: translate quiet/
+            # static-IP clients Pi-hole never named into real names — see
+            # app/resolve.py). Batched and backed off on its own, so this is a
+            # single cheap indexed read on most ticks.
+            resolve.resolve_batch(db.clients_missing_name())
+        except Exception:  # noqa: BLE001 — a resolver hiccup must not kill the loop
             pass
         _scheduler_stop.wait(ALERT_EVAL_INTERVAL)
 

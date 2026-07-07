@@ -26,6 +26,13 @@ services:
       # readable; falls back to DNSWATCH_AUTH_PASSWORD otherwise. Unset by
       # default — most single-user LAN setups don't need this.
       DNSWATCH_AUTH_PASSWORD_FILE: ${DNSWATCH_AUTH_PASSWORD_FILE:-}
+      # Optional: DNS server to query for reverse-DNS (PTR) lookups of LAN
+      # clients Pi-hole never named (see app/resolve.py). Unset = use whatever
+      # /etc/resolv.conf lists (this container's normal upstream). Many home
+      # routers answer PTR queries for their own DHCP leases even when they
+      # aren't Pi-hole's configured upstream — point this at your router's LAN
+      # IP if PTR lookups against the default resolver come back empty.
+      DNSWATCH_REVERSE_DNS_SERVER: ${DNSWATCH_REVERSE_DNS_SERVER:-}
     volumes:
       # Read-only mount of Pi-hole's data folder. ':ro' is critical — this
       # process must never be able to write to Pi-hole's database.

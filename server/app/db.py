@@ -26,7 +26,7 @@ import statistics
 import time
 
 import regex as _timed_regex
-from app import oui
+from app import oui, resolve
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -271,6 +271,50 @@ def _client_name_map(conn: sqlite3.Connection) -> dict[str, str | None]:
     return {r["ip"]: r["name"] for r in conn.execute("SELECT ip, name FROM network_addresses")}
 
 
+def clients_missing_name(limit: int = 50) -> list[str]:
+    """Client IPs Pi-hole has never named, most recently active first — the
+    candidate list resolve.py's background PTR pass works through. Capped so
+    a LAN with many silent/unnamed devices can't turn one scheduler tick into
+    an unbounded scan."""
+    if detect_schema().has_id_storage:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT q.client AS cid, MAX(q.timestamp) AS last_seen "
+                "FROM query_storage q GROUP BY q.client"
+            ).fetchall()
+            ipmap = _client_ip_map(conn)
+            namemap = _client_name_map(conn)
+        merged: dict[str, float] = {}
+        for r in rows:
+            ip = _resolve_client_value(r["cid"], ipmap)
+            merged[ip] = max(merged.get(ip, 0), r["last_seen"])
+        missing = [ip for ip in merged if not namemap.get(ip)]
+        missing.sort(key=lambda ip: merged[ip], reverse=True)
+        return missing[:limit]
+
+    select, join = _client_join_sql()
+    sql = f"""
+        SELECT {select}, MAX(q.timestamp) AS last_seen
+        FROM queries q
+        {join}
+        GROUP BY {_client_ip_col()}
+        HAVING client_name IS NULL OR client_name = ''
+        ORDER BY last_seen DESC
+        LIMIT ?
+    """
+    with _connect() as conn:
+        rows = conn.execute(sql, [limit]).fetchall()
+    return [r["client_ip"] for r in rows]
+
+
+def _display_name(client_name: str | None, ip: str, resolved: dict[str, str]) -> str:
+    """Pi-hole's own name, else DNS Watch's own reverse-DNS cache (resolve.py),
+    else the bare IP — the same "never blank, never lie about what we know"
+    fallback every client-name field in this module already used before
+    resolve.py existed, just with one more rung added below Pi-hole's name."""
+    return client_name or resolved.get(ip) or ip
+
+
 def is_placeholder_hwaddr(hwaddr: str | None) -> bool:
     """True when Pi-hole never captured a real layer-2 address for this client.
 
@@ -416,10 +460,11 @@ def list_clients() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(sql).fetchall()
         vmap = _client_vendor_map(conn)
+    resolved = resolve.get_names()
     return [
         {
             "ip": r["client_ip"],
-            "name": r["client_name"] or r["client_ip"],
+            "name": _display_name(r["client_name"], r["client_ip"], resolved),
             "query_count": r["query_count"],
             **_vendor_fields(r["client_ip"], vmap),
         }
@@ -459,6 +504,7 @@ def list_queries(
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
 
+    resolved = resolve.get_names()
     return [
         {
             "timestamp": r["timestamp"],
@@ -467,7 +513,7 @@ def list_queries(
             "raw_status": r["status"],
             "status": r["resolved_status"],
             "client_ip": r["client_ip"],
-            "client_name": r["client_name"] or r["client_ip"],
+            "client_name": _display_name(r["client_name"], r["client_ip"], resolved),
         }
         for r in rows
     ]
@@ -499,6 +545,7 @@ def tail_queries(since: float, since_id: int, limit: int = 500) -> list[dict]:
     """
     with _connect() as conn:
         rows = conn.execute(sql, [since, since, since_id, limit]).fetchall()
+    resolved = resolve.get_names()
     return [
         {
             "id": r["id"],
@@ -508,7 +555,7 @@ def tail_queries(since: float, since_id: int, limit: int = 500) -> list[dict]:
             "raw_status": r["status"],
             "status": r["resolved_status"],
             "client_ip": r["client_ip"],
-            "client_name": r["client_name"] or r["client_ip"],
+            "client_name": _display_name(r["client_name"], r["client_ip"], resolved),
         }
         for r in rows
     ]
@@ -730,8 +777,9 @@ def top_clients(since: int | None, limit: int = 15) -> list[dict]:
     params = [*params, limit]
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
+    resolved = resolve.get_names()
     return [
-        {"ip": r["client_ip"], "name": r["client_name"] or r["client_ip"], "count": r["n"]}
+        {"ip": r["client_ip"], "name": _display_name(r["client_name"], r["client_ip"], resolved), "count": r["n"]}
         for r in rows
     ]
 
@@ -1034,13 +1082,14 @@ def client_activity(
     for r in spark_rows:
         spark_by_ip.setdefault(r["ipcol"], {})[r["bucket"]] = r["n"]
 
+    resolved = resolve.get_names()
     result = []
     for t in top:
         ip = t["client_ip"]
         bmap = spark_by_ip.get(ip, {})
         result.append({
             "ip": ip,
-            "name": t["client_name"] or ip,
+            "name": _display_name(t["client_name"], ip, resolved),
             "count": t["n"],
             "first_seen": firsts.get(ip),
             "last_seen": t["last_seen"],
@@ -1130,12 +1179,13 @@ def _client_activity_id(
             b = spark_by_ip.setdefault(ip, {})
             b[r["bucket"]] = b.get(r["bucket"], 0) + r["n"]
 
+    resolved = resolve.get_names()
     result = []
     for ip, agg in top:
         bmap = spark_by_ip.get(ip, {})
         result.append({
             "ip": ip,
-            "name": namemap.get(ip) or ip,
+            "name": _display_name(namemap.get(ip), ip, resolved),
             "count": agg["n"],
             "first_seen": firsts.get(ip),
             "last_seen": agg["last_seen"],
@@ -1158,8 +1208,9 @@ def client_counts(since: int | None, until: int | None) -> list[dict]:
     """
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
+    resolved = resolve.get_names()
     return [
-        {"ip": r["client_ip"], "name": r["client_name"] or r["client_ip"], "count": r["n"]}
+        {"ip": r["client_ip"], "name": _display_name(r["client_name"], r["client_ip"], resolved), "count": r["n"]}
         for r in rows
     ]
 
@@ -1178,7 +1229,7 @@ def client_detail(ip: str, since: int | None, until: int | None) -> dict:
             [ip],
         ).fetchone()
         vendor_fields = _vendor_fields(ip, _client_vendor_map(conn))
-    name = row["client_name"] if row and row["client_name"] else ip
+    name = _display_name(row["client_name"] if row else None, ip, resolve.get_names())
     return {
         "ip": ip,
         "name": name,
@@ -1308,10 +1359,11 @@ def new_clients(after_ts: int) -> list[dict]:
     """
     with _connect() as conn:
         rows = conn.execute(sql, [after_ts]).fetchall()
+    resolved = resolve.get_names()
     return [
         {
             "ip": r["client_ip"],
-            "name": r["client_name"] or r["client_ip"],
+            "name": _display_name(r["client_name"], r["client_ip"], resolved),
             "first_seen": r["first_seen"],
             "total": r["total"],
         }
@@ -1339,8 +1391,9 @@ def _new_clients_id(after_ts: int) -> list[dict]:
             merged[ip] = (min(fs, r["fs"]), total + r["total"])
         else:
             merged[ip] = (r["fs"], r["total"])
+    resolved = resolve.get_names()
     out = [
-        {"ip": ip, "name": namemap.get(ip) or ip, "first_seen": fs, "total": total}
+        {"ip": ip, "name": _display_name(namemap.get(ip), ip, resolved), "first_seen": fs, "total": total}
         for ip, (fs, total) in merged.items()
         if fs >= after_ts
     ]
@@ -1441,6 +1494,7 @@ def simulate_pattern(pattern: str, since: int) -> dict:
     # Reuse the existing per-client totals helper rather than re-deriving
     # "how much does this client talk overall in this window" from scratch.
     client_totals = {c["ip"]: c["count"] for c in client_counts(since, None)}
+    resolved = resolve.get_names()
     clients = []
     for r in client_rows:
         ip = r["client_ip"]
@@ -1448,7 +1502,7 @@ def simulate_pattern(pattern: str, since: int) -> dict:
         total = client_totals.get(ip, matched)
         clients.append({
             "ip": ip,
-            "name": r["client_name"] or ip,
+            "name": _display_name(r["client_name"], ip, resolved),
             "matched_count": matched,
             "total_count": total,
             "pct_of_client_traffic": round(matched / total * 100, 1) if total else 0.0,
@@ -1532,7 +1586,11 @@ def _anomaly_inputs(
                 [baseline_start],
             ).fetchall()
         first_seen = {r["client_ip"]: r["fs"] for r in first_seen_rows}
-        names = {r["client_ip"]: (r["client_name"] or r["client_ip"]) for r in first_seen_rows}
+        resolved = resolve.get_names()
+        names = {
+            r["client_ip"]: _display_name(r["client_name"], r["client_ip"], resolved)
+            for r in first_seen_rows
+        }
         per_client_buckets: dict[str, dict[int, int]] = {}
         for r in bucket_rows:
             per_client_buckets.setdefault(r["ip"], {})[r["bucket"]] = r["n"]
@@ -1572,7 +1630,8 @@ def _anomaly_inputs(
         ip = _resolve_client_value(r["cid"], ipmap)
         first_seen[ip] = r["fs"] if ip not in first_seen else min(first_seen[ip], r["fs"])
 
-    names = {ip: (namemap.get(ip) or ip) for ip in first_seen}
+    resolved = resolve.get_names()
+    names = {ip: _display_name(namemap.get(ip), ip, resolved) for ip in first_seen}
     return per_client_buckets, first_seen, names
 
 
