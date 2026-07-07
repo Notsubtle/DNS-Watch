@@ -139,7 +139,8 @@ def init_rollup_store() -> None:
             CREATE TABLE IF NOT EXISTS daily_totals (
                 day TEXT PRIMARY KEY,
                 allowed_count INTEGER NOT NULL DEFAULT 0,
-                blocked_count INTEGER NOT NULL DEFAULT 0
+                blocked_count INTEGER NOT NULL DEFAULT 0,
+                unknown_count INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS client_domain_rollup (
                 ip TEXT NOT NULL,
@@ -178,6 +179,17 @@ def init_rollup_store() -> None:
                 VALUES (1, NULL);
             """
         )
+        # daily_totals predates unknown_count (#2 -- needed so the "All" range's
+        # timeseries total isn't silently undercounted by whatever fraction of
+        # rows carry a status outside both BLOCKED_STATUSES/ALLOWED_STATUSES).
+        # CREATE TABLE IF NOT EXISTS above is a no-op on a store that already has
+        # the table, so a store created before this column existed needs an
+        # explicit, idempotent ALTER -- this codebase's usual "just CREATE IF NOT
+        # EXISTS" convention only covers whole new tables, not new columns on an
+        # existing one.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(daily_totals)")}
+        if "unknown_count" not in cols:
+            conn.execute("ALTER TABLE daily_totals ADD COLUMN unknown_count INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
 
@@ -313,7 +325,7 @@ class _Deltas:
         self.domain: dict[str, int] = {}
         self.client: dict[str, dict] = {}  # ip -> {count, first_seen, last_seen, name}
         self.qtype: dict[int, int] = {}
-        self.daily: dict[str, list[int]] = {}  # day -> [allowed, blocked]
+        self.daily: dict[str, list[int]] = {}  # day -> [allowed, blocked, unknown]
         self.client_domain: dict[tuple[str, str], int] = {}
         self.client_activity: dict[tuple[str, str], int] = {}
 
@@ -329,13 +341,18 @@ class _Deltas:
         # (matching summary()'s total_queries counting every row).
         self.qtype[row["type"]] = self.qtype.get(row["type"], 0) + 1
 
-        d = self.daily.setdefault(day, [0, 0])
+        d = self.daily.setdefault(day, [0, 0, 0])
         if status in db.BLOCKED_STATUSES:
             d[1] += 1
         elif status in db.ALLOWED_STATUSES:
             d[0] += 1
-        # "unknown" status (neither set) is counted in neither column, matching
-        # timeseries()'s allowed/blocked definitions.
+        else:
+            # Tracked separately (#2) so read_timeseries()'s "total" can match
+            # timeseries()'s COUNT(*) exactly -- allowed+blocked alone would
+            # silently undercount by however many rows fall outside both sets
+            # (real Pi-hole data: a status-14 "OTHER" tail was ~3% of all rows
+            # in the snapshot this was validated against).
+            d[2] += 1
 
         if domain is not None:
             self.domain[domain] = self.domain.get(domain, 0) + 1
@@ -377,11 +394,12 @@ def _apply(conn: sqlite3.Connection, deltas: _Deltas) -> None:
         )
     if deltas.daily:
         conn.executemany(
-            "INSERT INTO daily_totals (day, allowed_count, blocked_count) VALUES (?, ?, ?) "
+            "INSERT INTO daily_totals (day, allowed_count, blocked_count, unknown_count) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(day) DO UPDATE SET "
             "allowed_count = allowed_count + excluded.allowed_count, "
-            "blocked_count = blocked_count + excluded.blocked_count",
-            [(day, a, b) for day, (a, b) in deltas.daily.items()],
+            "blocked_count = blocked_count + excluded.blocked_count, "
+            "unknown_count = unknown_count + excluded.unknown_count",
+            [(day, a, b, u) for day, (a, b, u) in deltas.daily.items()],
         )
     if deltas.client:
         conn.executemany(
@@ -761,3 +779,112 @@ def read_query_types() -> list[dict] | None:
     ]
     out.sort(key=lambda x: x["count"], reverse=True)
     return out
+
+
+def _day_start_ts(day: str) -> int:
+    """Inverse of _day_str: the UTC midnight timestamp a day key represents."""
+    return int(datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+
+
+def _all_range_days(conn: sqlite3.Connection) -> list[str] | None:
+    """Every UTC day key from the earliest day with data through today,
+    inclusive, with no gaps -- the shared x-axis for read_timeseries() and
+    read_client_activity() so the two "All" range charts always line up.
+    `daily_totals` is the source of truth for "which days have any data" since
+    _Deltas.add() writes a day bucket for EVERY row, including ones whose
+    domain/client didn't resolve (unlike client_activity_rollup, which only
+    gets a row when the client resolved) -- see the module's DRIFT note."""
+    first = conn.execute("SELECT MIN(day) AS d FROM daily_totals").fetchone()["d"]
+    if first is None:
+        return None
+    today = _day_str(time.time())
+    days = []
+    d = first
+    while d <= today:
+        days.append(d)
+        d = _day_str(_day_start_ts(d) + 86400)
+    return days
+
+
+def read_timeseries() -> dict | None:
+    """Serve db.timeseries(None, None, None, ...) -- the "All" range, no client
+    filter -- from daily_totals, one bucket per UTC day (see #2: this trades
+    the direct path's arbitrary data-window-derived bucket width for reusing
+    the existing day-granular rollup as-is; a real, disclosed behavior change
+    for this one chart, not a bug). "total" is allowed+blocked+unknown so it
+    matches direct COUNT(*) exactly -- see unknown_count's own comment."""
+    init_rollup_store()
+    with _connect() as conn:
+        if not _rollups_backfilled(conn):
+            return None
+        days = _all_range_days(conn)
+        if days is None:
+            return None
+        rows = {
+            r["day"]: r
+            for r in conn.execute(
+                "SELECT day, allowed_count, blocked_count, unknown_count FROM daily_totals"
+            ).fetchall()
+        }
+    series = []
+    for day in days:
+        r = rows.get(day)
+        allowed = r["allowed_count"] if r else 0
+        blocked = r["blocked_count"] if r else 0
+        unknown = r["unknown_count"] if r else 0
+        series.append({
+            "t": _day_start_ts(day),
+            "allowed": allowed,
+            "blocked": blocked,
+            "total": allowed + blocked + unknown,
+        })
+    return {
+        "since": series[0]["t"],
+        "until": int(time.time()),
+        "bucket_seconds": 86400,
+        "series": series,
+    }
+
+
+def read_client_activity(limit: int) -> list[dict] | None:
+    """Serve db.client_activity(None, None, limit, ...) -- the "All" range --
+    from client_totals (top-N ranking + global first/last-seen, same source
+    read_top_clients() uses) and client_activity_rollup (per-day sparkline).
+    Same day-aligned bucketing tradeoff as read_timeseries() -- see #2."""
+    init_rollup_store()
+    with _connect() as conn:
+        if not _rollups_backfilled(conn):
+            return None
+        days = _all_range_days(conn)
+        if days is None:
+            return None
+        top = conn.execute(
+            "SELECT ip, count, first_seen, last_seen, name FROM client_totals "
+            "ORDER BY count DESC LIMIT ?",
+            [limit],
+        ).fetchall()
+        if not top:
+            return []
+        ips = [t["ip"] for t in top]
+        placeholders = ",".join("?" for _ in ips)
+        spark_rows = conn.execute(
+            f"SELECT ip, day, count FROM client_activity_rollup WHERE ip IN ({placeholders})",
+            ips,
+        ).fetchall()
+    day_index = {day: i for i, day in enumerate(days)}
+    spark_by_ip: dict[str, list[int]] = {ip: [0] * len(days) for ip in ips}
+    for r in spark_rows:
+        idx = day_index.get(r["day"])
+        if idx is not None:  # guards a day outside the computed range, e.g. clock skew
+            spark_by_ip[r["ip"]][idx] = r["count"]
+    return [
+        {
+            "ip": t["ip"],
+            "name": t["name"] or t["ip"],
+            "count": t["count"],
+            "first_seen": t["first_seen"],
+            "last_seen": t["last_seen"],
+            "sparkline": spark_by_ip[t["ip"]],
+        }
+        for t in top
+    ]

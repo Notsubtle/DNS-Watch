@@ -81,6 +81,32 @@ def test_refresh_matches_summary_all_schemas(ftl, rstore):
     assert sum(a + b for a, b in st["daily"].values()) == trusted["total_queries"]
 
 
+def test_timeseries_and_client_activity_served_from_rollup_all_schemas(ftl, rstore):
+    """#2: the "All" range's timeseries/client_activity, once backfilled, are
+    served from the rollup (day-aligned buckets) rather than the direct scan.
+    Bucket boundaries are deliberately different from the direct path now (see
+    read_timeseries()'s docstring) -- correctness here means totals reconcile
+    against trusted whole-table aggregates, not identical bucket-by-bucket
+    values to the old direct-path shape."""
+    rollups.refresh_rollups()
+    trusted_total = db.count_queries(None, None, None, None, None)
+    trusted_summary = db.summary(None, None, None)
+
+    ts = db.timeseries(None, None, None, buckets=40)
+    assert ts["bucket_seconds"] == 86400
+    assert sum(p["total"] for p in ts["series"]) == trusted_total
+    assert sum(p["allowed"] for p in ts["series"]) + sum(p["blocked"] for p in ts["series"]) \
+        <= trusted_total  # equal unless the fixture has "unknown"-status rows
+    assert sum(p["blocked"] for p in ts["series"]) == trusted_summary["blocked"]
+
+    ca = db.client_activity(None, None, limit=10, buckets=20)
+    assert ca  # the ftl fixture always has clients
+    for c in ca:
+        assert sum(c["sparkline"]) == c["count"]
+    # Ranking matches the trusted top_clients() order (same client_totals source).
+    assert [c["ip"] for c in ca] == [c["ip"] for c in db.top_clients(None, limit=10)]
+
+
 def test_refresh_noop_when_nothing_new(ftl, rstore):
     rollups.refresh_rollups()
     again = rollups.refresh_rollups()

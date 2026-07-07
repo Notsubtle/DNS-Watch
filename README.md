@@ -311,10 +311,14 @@ Beyond the dashboard, three purpose-built views for digging into a specific ques
   rows; this means "All" reflects reality within a disclosed staleness window (up to
   ~24h around a prune), not perfectly to-the-second — a deliberate tradeoff for
   turning a 13–32 second query into a sub-10-millisecond one. Bounded ranges
-  (15m/1h/24h/7d) are untouched by any of this; they were already fast. Timeseries and
-  the per-client activity chart aren't wired into the rollup cache yet — their bucket
-  boundaries don't cleanly map to the rollup's day-granularity — so those two still
-  use the (correct, just not rollup-accelerated) direct scan for "All".
+  (15m/1h/24h/7d) are untouched by any of this; they were already fast. The
+  query-volume timeseries and the per-client activity chart are now served from
+  the rollup for "All" too, with one deliberate, visible tradeoff: their buckets
+  are whole UTC days (matching the rollup's own day-granularity) instead of the
+  arbitrary data-window-derived width bounded ranges use — a long history shows
+  more, evenly-spaced bars rather than a fixed ~40-60 buckets stretched across
+  the whole range. Everything else about "All" (totals, blocked/allowed counts)
+  matches the direct scan exactly.
 - **Optional index for very large deployments.** On the normalized schema, if your
   Pi-hole database has grown to millions of rows and *top domains* / *top clients*
   over the "All" range still feel slow, you can add two indexes to your **own**
