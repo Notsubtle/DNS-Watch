@@ -45,8 +45,22 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+# STORE_PATHs already known to have the table (and WAL mode) set up, so
+# get_names() — called on nearly every dashboard read — doesn't pay for a
+# write transaction each time. Keyed by path (not a bare bool) so tests that
+# monkeypatch STORE_PATH per-test each still get their own real init.
+_initialized_stores: set[str] = set()
+
+
 def init_store() -> None:
+    if STORE_PATH in _initialized_stores:
+        return
     with _connect() as conn:
+        # WAL is a file-level setting (persists in the db header), so this
+        # also benefits alerts.py/rollups.py/resolve.py, which share this
+        # same physical file in production — readers no longer block on a
+        # writer.
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS manual_client_names (
@@ -58,6 +72,7 @@ def init_store() -> None:
             """
         )
         conn.commit()
+    _initialized_stores.add(STORE_PATH)
 
 
 def get_names() -> dict[str, str]:

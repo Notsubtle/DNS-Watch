@@ -61,8 +61,21 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+# STORE_PATHs already known to have the table (and WAL mode) set up, so
+# get_names() — called on nearly every dashboard read — doesn't pay for a
+# write transaction each time. Keyed by path (not a bare bool) so tests that
+# monkeypatch STORE_PATH per-test each still get their own real init.
+_initialized_stores: set[str] = set()
+
+
 def init_store() -> None:
+    if STORE_PATH in _initialized_stores:
+        return
     with _connect() as conn:
+        # WAL is a file-level setting (persists in the db header), so this
+        # also benefits alerts.py/rollups.py/names.py, which share this same
+        # physical file in production — readers no longer block on a writer.
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS resolved_names (
@@ -75,6 +88,7 @@ def init_store() -> None:
             """
         )
         conn.commit()
+    _initialized_stores.add(STORE_PATH)
 
 
 def get_names() -> dict[str, str]:
@@ -210,6 +224,7 @@ def resolve_batch(candidate_ips: list[str], now: int | None = None) -> int:
     up (for tests/observability), not how many succeeded."""
     now = now if now is not None else int(time.time())
     init_store()
+
     with _connect() as conn:
         due = []
         for ip in candidate_ips:
@@ -220,9 +235,21 @@ def resolve_batch(candidate_ips: list[str], now: int | None = None) -> int:
                 due.append(ip)
             if len(due) >= BATCH_SIZE:
                 break
-
+        prev_attempts = {}
         for ip in due:
-            name = _lookup(ip)
+            row = conn.execute(
+                "SELECT attempts FROM resolved_names WHERE ip = ?", (ip,)
+            ).fetchone()
+            prev_attempts[ip] = row["attempts"] if row else 0
+
+    # Network I/O (up to BATCH_SIZE blocking UDP queries) happens with no
+    # write transaction open, so a slow/unreachable resolver never holds a
+    # SQLite write lock against alerts.py/rollups.py/names.py, which share
+    # this same store file.
+    results = {ip: _lookup(ip) for ip in due}
+
+    with _connect() as conn:
+        for ip, name in results.items():
             if name:
                 conn.execute(
                     "INSERT INTO resolved_names (ip, name, resolved_at, attempts, next_attempt_at) "
@@ -232,10 +259,7 @@ def resolve_batch(candidate_ips: list[str], now: int | None = None) -> int:
                     (ip, name, now, now + _SUCCESS_REFRESH_SECONDS),
                 )
             else:
-                prev = conn.execute(
-                    "SELECT attempts FROM resolved_names WHERE ip = ?", (ip,)
-                ).fetchone()
-                attempts = (prev["attempts"] if prev else 0) + 1
+                attempts = prev_attempts[ip] + 1
                 backoff = _FAILURE_BACKOFF[min(attempts - 1, len(_FAILURE_BACKOFF) - 1)]
                 conn.execute(
                     "INSERT INTO resolved_names (ip, name, resolved_at, attempts, next_attempt_at) "
