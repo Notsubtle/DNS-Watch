@@ -33,7 +33,7 @@ import sqlite3
 import pytest
 
 from conftest import _idstore_client_id, _idstore_domain_id, _idstore_schema
-from app import db, rollups
+from app import db, names, resolve, rollups
 
 
 # --------------------------------------------------------------------------
@@ -194,6 +194,41 @@ def test_read_top_clients_matches_direct_idstore(idb, rstore):
     # Dup ip merged to one row; orphan clients folded into one None row.
     assert [r["ip"] for r in full].count(_DUP_IP) == 1
     assert [r["ip"] for r in full].count(None) == 1
+
+
+def test_read_top_clients_applies_manual_and_resolved_names(idb, rstore, monkeypatch):
+    """Regression: read_top_clients() used to serve client_totals.name (Pi-hole's
+    own name) or the bare ip directly, unlike every direct-scan path -- which
+    layers a manual override (names.py) and DNS Watch's own reverse-DNS cache
+    (resolve.py) on top via db._display_name. A client renamed by hand, or
+    resolved via PTR, must show that friendly name on the All-time view too,
+    not just on bounded ranges."""
+    _build_idstore_with_traps(idb, _NOW - 5 * 86400, _NOW)
+    rollups.refresh_rollups()
+
+    manually_named_ip = _CLIENTS[2][0]  # ("192.168.0.12", None) -- Pi-hole never named this one
+    names.set_name(manually_named_ip, "My Fridge")
+
+    # Also give it a (stubbed) successful PTR resolution, to prove the manual
+    # override still wins over that too -- same precedence db._display_name
+    # enforces on every other path.
+    monkeypatch.setattr(resolve, "_lookup", lambda ip, timeout=None: "desktop.lan")
+    resolve.resolve_batch([manually_named_ip])
+
+    got = {r["ip"]: r["name"] for r in rollups.read_top_clients(1000)}
+    # Manual override wins even over a (stubbed) successful PTR resolution.
+    assert got[manually_named_ip] == "My Fridge"
+
+
+def test_read_client_activity_applies_manual_and_resolved_names(idb, rstore):
+    _build_idstore_with_traps(idb, _NOW - 5 * 86400, _NOW)
+    rollups.refresh_rollups()
+
+    manually_named_ip = _CLIENTS[2][0]
+    names.set_name(manually_named_ip, "My Fridge")
+
+    got = {r["ip"]: r["name"] for r in rollups.read_client_activity(1000)}
+    assert got[manually_named_ip] == "My Fridge"
 
 
 def test_read_query_types_matches_direct_idstore(idb, rstore):

@@ -82,6 +82,66 @@ def test_lookup_times_out_cleanly_on_silence():
         sock.close()
 
 
+def test_lookup_uses_a_fresh_query_id_each_call(monkeypatch):
+    """Regression: the query id used to be a constant derived from
+    os.getpid(), identical for the whole process lifetime -- an attacker
+    racing the real reply on a shared LAN only had to guess one fixed value.
+    It must vary from call to call."""
+    sent_ids = []
+    real_sendto = socket.socket.sendto
+
+    def _spy_sendto(self, data, addr):
+        sent_ids.append(struct.unpack(">H", data[:2])[0])
+        return real_sendto(self, data, addr)
+
+    monkeypatch.setattr(socket.socket, "sendto", _spy_sendto)
+    for _ in range(5):
+        # port 1 is a valid but (almost certainly) closed/unreachable port on
+        # loopback -- sendto succeeds either way, and we only care about what
+        # id got baked into the packet, not the (irrelevant, expected-to-fail)
+        # response.
+        resolve._lookup_via("192.168.1.10", "127.0.0.1", 1, timeout=0.05)
+    assert len(set(sent_ids)) > 1, f"query id did not vary across calls: {sent_ids}"
+
+
+def test_lookup_rejects_reply_from_unexpected_source_address():
+    """Regression: recvfrom() doesn't filter by peer address on its own, so
+    without an explicit source check, ANY host that can get a packet to our
+    ephemeral port -- not just the server we actually queried -- could inject
+    a PTR answer. Model this without needing raw sockets/root (real IP
+    spoofing) by having the reply come from a genuinely different, legitimate
+    loopback address than the one _lookup_via was told to trust -- exactly
+    the shape of an off-path attacker racing the real reply from their own
+    machine. A byte-for-byte well-formed reply from the wrong address must be
+    discarded, not accepted."""
+    query_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    query_sock.bind(("127.0.0.1", 0))
+    query_port = query_sock.getsockname()[1]
+
+    reply_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    reply_sock.bind(("127.0.0.2", 0))  # different address than we'll ask _lookup_via to trust
+
+    def _serve():
+        try:
+            data, client_addr = query_sock.recvfrom(512)
+        except OSError:
+            return
+        req_id = struct.unpack(">H", data[:2])[0]
+        header = struct.pack(">HHHHHH", req_id, 0x8180, 1, 1, 0, 0)
+        question = data[12:len(data)]
+        rdata = b"".join(bytes([len(l)]) + l.encode() for l in "spoofed.lan".split(".")) + b"\x00"
+        answer = b"\xc0\x0c" + struct.pack(">HHIH", 12, 1, 60, len(rdata)) + rdata
+        reply_sock.sendto(header + question + answer, client_addr)
+
+    threading.Thread(target=_serve, daemon=True).start()
+    try:
+        name = resolve._lookup_via("192.168.1.10", "127.0.0.1", query_port, timeout=0.5)
+        assert name is None
+    finally:
+        query_sock.close()
+        reply_sock.close()
+
+
 def test_resolve_batch_caches_success(monkeypatch):
     monkeypatch.setattr(resolve, "_lookup", lambda ip, timeout=None: "phone.lan")
     n = resolve.resolve_batch(["192.168.1.5"], now=1000)

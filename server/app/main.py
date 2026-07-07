@@ -134,6 +134,15 @@ async def basic_auth(request, call_next):
 
 _STATE_CHANGING_METHODS = {"POST", "PATCH", "DELETE"}
 
+# GET /api/alerts is the one exception to "GET is read-only": it evaluates
+# alert rules on every call (writing alert_events rows and potentially firing
+# a webhook), so it needs the same cross-origin protection as an actual
+# state-changing method even though its HTTP verb says otherwise. Scoped to
+# just this path rather than broadening the check to every GET, which would
+# risk rejecting legitimate cross-origin consumers of the many genuinely
+# read-only endpoints (e.g. an external dashboard fetching queries.csv).
+_MUTATING_GET_PATHS = {"/api/alerts"}
+
 
 @app.middleware("http")
 async def csrf_guard(request, call_next):
@@ -155,7 +164,7 @@ async def csrf_guard(request, call_next):
     Host unchanged (the common default for Caddy/nginx/Traefik) or
     legitimate same-origin requests get rejected here too.
     """
-    if request.method in _STATE_CHANGING_METHODS:
+    if request.method in _STATE_CHANGING_METHODS or request.url.path in _MUTATING_GET_PATHS:
         source = request.headers.get("origin") or request.headers.get("referer")
         if source:
             # Reject on ANY mismatch, including an empty netloc — an opaque

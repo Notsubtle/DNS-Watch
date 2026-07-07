@@ -25,6 +25,7 @@ into a slow dashboard load.
 from __future__ import annotations
 
 import os
+import secrets
 import socket
 import sqlite3
 import struct
@@ -127,8 +128,8 @@ def _reverse_name(ip: str) -> str | None:
     return ".".join(reversed(parts)) + ".in-addr.arpa"
 
 
-def _build_ptr_query(qname: str) -> bytes:
-    header = struct.pack(">HHHHHH", os.getpid() & 0xFFFF, 0x0100, 1, 0, 0, 0)
+def _build_ptr_query(qname: str, query_id: int) -> bytes:
+    header = struct.pack(">HHHHHH", query_id, 0x0100, 1, 0, 0, 0)
     question = b"".join(bytes([len(label)]) + label.encode() for label in qname.split(".")) + b"\x00"
     question += struct.pack(">HH", 12, 1)  # QTYPE=PTR, QCLASS=IN
     return header + question
@@ -201,18 +202,34 @@ def _lookup(ip: str, timeout: float = LOOKUP_TIMEOUT_SECONDS) -> str | None:
 def _lookup_via(ip: str, server: str, port: int, timeout: float) -> str | None:
     """One PTR query against a specific (server, port) — split out from
     _lookup() so tests can point it at a real loopback fake resolver instead
-    of mocking the socket layer away."""
+    of mocking the socket layer away.
+
+    query_id is fresh and unpredictable per call (not the old constant
+    os.getpid()-derived value), and a reply is only accepted from the exact
+    (server, port) queried — recvfrom() doesn't filter by peer on its own, so
+    without this check any host that can race the real reply on the LAN could
+    spoof a PTR answer using the old guessable id. Spoofed/stray packets are
+    silently discarded and waited past (not treated as a fast failure) so an
+    attacker flooding bogus replies can't shorten the real timeout; only
+    genuine unresponsiveness reaches it."""
     qname = _reverse_name(ip)
     if qname is None:
         return None
-    query_id = os.getpid() & 0xFFFF
-    packet = _build_ptr_query(qname)
+    query_id = secrets.randbelow(0x10000)
+    packet = _build_ptr_query(qname, query_id)
+    deadline = time.monotonic() + timeout
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(timeout)
             sock.sendto(packet, (server, port))
-            data, _ = sock.recvfrom(512)
-        return _parse_ptr_response(data, query_id)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                sock.settimeout(remaining)
+                data, addr = sock.recvfrom(512)
+                if addr[0] != server:
+                    continue  # not from the server we queried; keep waiting for the real reply
+                return _parse_ptr_response(data, query_id)
     except (OSError, struct.error, IndexError):
         return None
 
