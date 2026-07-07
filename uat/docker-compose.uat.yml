@@ -77,6 +77,10 @@ services:
       PIHOLE_DB_PATH: /pihole-data/pihole-FTL.db
       DNSWATCH_DB_PATH: /data/dnswatch.db
       ALERT_EVAL_INTERVAL_SECONDS: 60
+      # Optional: override which DNS server reverse-DNS (PTR) lookups go to
+      # (see server/app/resolve.py). Unset by default = whatever this
+      # container's own /etc/resolv.conf lists.
+      DNSWATCH_REVERSE_DNS_SERVER: ${DNSWATCH_REVERSE_DNS_SERVER:-}
     volumes:
       # Directory mount — see the `api` service's volumes comment above for why.
       - ./pihole-data:/pihole-data:ro

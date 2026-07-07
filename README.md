@@ -221,8 +221,17 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   for the actual request — so a DNS record that changes between the check and the
   delivery can't be used to redirect the request to a blocked target after the
   fact.
-- **Client naming** — pulls names Pi-hole already knows (from DHCP lease / your
-  manual naming in Pi-hole's own UI); no separate naming step needed.
+- **Client naming** — pulls names Pi-hole already knows first (from DHCP lease /
+  your manual naming in Pi-hole's own UI); no separate naming step needed. For
+  clients Pi-hole never names — static-IP or otherwise-quiet devices — DNS Watch
+  does its own reverse-DNS (PTR) lookups in the background, caches results, and
+  backs off automatically on IPs that never answer, so a permanently silent
+  device doesn't get re-queried on every tick. Point `DNSWATCH_REVERSE_DNS_SERVER`
+  (see `.env.example`) at your router's LAN IP if the default resolver comes back
+  empty — many home routers answer PTR queries for their own DHCP leases even when
+  they aren't Pi-hole's configured upstream. mDNS was considered and left out: this
+  container's default bridge network can't see LAN multicast traffic (a real
+  networking trade-off, not a code gap — see `server/app/resolve.py`).
 - **Vendor identification** — the client detail view shows a device's manufacturer
   when it can be determined: first from Pi-hole's own MAC-vendor lookup, and, when
   that's empty, from a bundled offline IEEE OUI table (regenerated via

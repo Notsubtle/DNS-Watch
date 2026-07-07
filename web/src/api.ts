@@ -179,6 +179,29 @@ export interface AppSettingsUpdate {
   webhook_secret?: string;
 }
 
+export interface DeviceNameRow {
+  ip: string;
+  // The user's own override, if set — takes priority everywhere else in the
+  // app over pihole_name/resolved_name (see server/app/db.py _display_name).
+  manual_name: string | null;
+  // Pi-hole's own name (DHCP lease / mDNS / set in Pi-hole's own UI), if any.
+  pihole_name: string | null;
+  // DNS Watch's own reverse-DNS (PTR) cache, if any — see resolve.py.
+  resolved_name: string | null;
+  // What the rest of the dashboard currently shows for this ip.
+  display_name: string;
+  query_count: number;
+  last_seen: number | null;
+  // False for a manual name whose ip has no CURRENT Pi-hole traffic (a
+  // device that's gone quiet or been replaced) — kept visible so a stale
+  // override stays deletable instead of silently vanishing.
+  seen: boolean;
+  hwaddr: string | null;
+  mac_known: boolean;
+  vendor: string | null;
+  vendor_unknown_reason: "randomized" | "unlisted" | null;
+}
+
 export interface Filters {
   client: string; // "" = all
   domain: string;
@@ -207,7 +230,16 @@ async function sendJson<T>(url: string, method: string, body?: unknown): Promise
     headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(`${method} ${url} -> ${res.status}`);
+  if (!res.ok) {
+    // FastAPI's HTTPException body is {"detail": "..."} — surface that
+    // instead of a bare status code when the server bothered to explain
+    // itself (e.g. a validation message on a 400).
+    const detail = await res
+      .json()
+      .then((b) => (typeof b?.detail === "string" ? b.detail : null))
+      .catch(() => null);
+    throw new Error(detail || `${method} ${url} -> ${res.status}`);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -296,6 +328,12 @@ export const api = {
   updateRule: (id: number, patch: { name?: string; enabled?: boolean; params?: Record<string, unknown> }) =>
     sendJson<AlertRule>(`/api/alert-rules/${id}`, "PATCH", patch),
   deleteRule: (id: number) => sendJson<{ deleted: number }>(`/api/alert-rules/${id}`, "DELETE"),
+
+  deviceNames: () => getJson<DeviceNameRow[]>("/api/device-names"),
+  setDeviceName: (ip: string, name: string) =>
+    sendJson<{ ip: string; name: string }>(`/api/device-names/${encodeURIComponent(ip)}`, "PUT", { name }),
+  deleteDeviceName: (ip: string) =>
+    sendJson<{ deleted: string }>(`/api/device-names/${encodeURIComponent(ip)}`, "DELETE"),
 
   getSettings: () => getJson<AppSettings>("/api/settings"),
   updateSettings: (patch: AppSettingsUpdate) =>

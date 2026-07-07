@@ -357,9 +357,16 @@ def _isolate_rollup_store(tmp_path, monkeypatch):
     rollups.py's real default (/data/dnswatch.db), which doesn't exist and
     isn't creatable by a non-root test process (this is exactly what broke
     CI). Autouse + session-independent tmp_path closes this for every test,
-    present and future, rather than patching each fixture individually."""
-    from app import rollups
+    present and future, rather than patching each fixture individually.
+
+    resolve.py and names.py share that same DNSWATCH_DB_PATH file in
+    production and are both read unconditionally by every db.py display-name
+    call site (see db._display_name), so they need the identical treatment or
+    they hit the same non-existent /data/dnswatch.db default."""
+    from app import names, resolve, rollups
     monkeypatch.setattr(rollups, "STORE_PATH", str(tmp_path / "rollups-isolated.db"))
+    monkeypatch.setattr(resolve, "STORE_PATH", str(tmp_path / "resolve-isolated.db"))
+    monkeypatch.setattr(names, "STORE_PATH", str(tmp_path / "names-isolated.db"))
 
 
 @pytest.fixture

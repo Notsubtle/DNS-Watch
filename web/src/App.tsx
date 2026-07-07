@@ -25,6 +25,7 @@ import AlertsPanel from "./components/AlertsPanel";
 import AnomaliesPanel from "./components/AnomaliesPanel";
 import AnomalyDetailDrawer from "./components/AnomalyDetailDrawer";
 import RulesModal from "./components/RulesModal";
+import DeviceNamesModal from "./components/DeviceNamesModal";
 import SettingsModal from "./components/SettingsModal";
 import TabNav, { View } from "./components/TabNav";
 import LiveStreamTab from "./components/LiveStreamTab";
@@ -81,6 +82,7 @@ export default function App() {
   const [anomalyDetail, setAnomalyDetail] = useState<Anomaly | null>(null);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [deviceNamesOpen, setDeviceNamesOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const sideColRef = useRef<HTMLDivElement>(null);
   const [sideColHeight, setSideColHeight] = useState<number>();
@@ -175,6 +177,18 @@ export default function App() {
     setAnomalyDetail(a);
   }
 
+  // Refresh everything that shows a client name (after a rename/clear in the
+  // Manage Device Names modal) — the current dashboard rows/top-clients AND
+  // the raw client list FilterBar's dropdown is built from.
+  async function reloadClientNames() {
+    try {
+      api.clients().then(setClients).catch(() => {});
+      await refresh(false);
+    } catch {
+      /* surfaced by the main refresh loop */
+    }
+  }
+
   // Re-evaluate alerts on demand (after a rule is added/toggled/removed).
   async function reloadAlerts() {
     try {
@@ -225,9 +239,14 @@ export default function App() {
           </h1>
           <div className="subtitle">Live per-client DNS activity from Pi-hole</div>
         </div>
-        <button className="btn-small header-settings" onClick={() => setSettingsOpen(true)}>
-          ⚙ Settings
-        </button>
+        <div className="header-actions">
+          <button className="btn-small" onClick={() => setDeviceNamesOpen(true)}>
+            🏷 Name Devices
+          </button>
+          <button className="btn-small header-settings" onClick={() => setSettingsOpen(true)}>
+            ⚙ Settings
+          </button>
+        </div>
       </div>
 
       <TabNav view={view} onChange={setView} />
@@ -304,6 +323,10 @@ export default function App() {
       {view === "heatmap" && <ClientHeatmapTab clients={clients} />}
 
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+
+      {deviceNamesOpen && (
+        <DeviceNamesModal onClose={() => setDeviceNamesOpen(false)} onChange={reloadClientNames} />
+      )}
 
       <AnomalyDetailDrawer anomaly={anomalyDetail} onClose={() => setAnomalyDetail(null)} />
     </div>
