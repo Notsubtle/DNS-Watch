@@ -359,13 +359,14 @@ def _isolate_rollup_store(tmp_path, monkeypatch):
     CI). Autouse + session-independent tmp_path closes this for every test,
     present and future, rather than patching each fixture individually.
 
-    resolve.py shares that same DNSWATCH_DB_PATH file in production and is
-    read unconditionally by every db.py display-name call site (see
-    db._display_name), so it needs the identical treatment or it hits the
-    same non-existent /data/dnswatch.db default."""
-    from app import resolve, rollups
+    resolve.py and names.py share that same DNSWATCH_DB_PATH file in
+    production and are both read unconditionally by every db.py display-name
+    call site (see db._display_name), so they need the identical treatment or
+    they hit the same non-existent /data/dnswatch.db default."""
+    from app import names, resolve, rollups
     monkeypatch.setattr(rollups, "STORE_PATH", str(tmp_path / "rollups-isolated.db"))
     monkeypatch.setattr(resolve, "STORE_PATH", str(tmp_path / "resolve-isolated.db"))
+    monkeypatch.setattr(names, "STORE_PATH", str(tmp_path / "names-isolated.db"))
 
 
 @pytest.fixture

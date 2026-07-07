@@ -18,7 +18,7 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import alerts, db, resolve, rollups
+from app import alerts, db, names, resolve, rollups
 
 # How often the server evaluates alert rules on its own, independent of any open
 # dashboard. This is what makes alerting/webhooks work headless. Set to 0 to
@@ -393,6 +393,10 @@ class WebhookTest(BaseModel):
     format: str = "generic"
 
 
+class DeviceNameUpdate(BaseModel):
+    name: str
+
+
 @app.get("/api/settings")
 def api_get_settings():
     return alerts.get_settings()
@@ -451,6 +455,29 @@ def api_delete_rule(rule_id: int):
     if not alerts.delete_rule(rule_id):
         raise HTTPException(status_code=404, detail="rule not found")
     return {"deleted": rule_id}
+
+
+@app.get("/api/device-names")
+def api_list_device_names():
+    """Every ip DNS Watch knows about, with each name source broken out
+    separately, for the "Manage Device Names" UI — see db.device_name_rows()."""
+    return db.device_name_rows()
+
+
+@app.put("/api/device-names/{ip}")
+def api_set_device_name(ip: str, body: DeviceNameUpdate):
+    try:
+        names.set_name(ip, body.name)
+    except names.InvalidName as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ip": ip, "name": body.name}
+
+
+@app.delete("/api/device-names/{ip}")
+def api_delete_device_name(ip: str):
+    if not names.delete_name(ip):
+        raise HTTPException(status_code=404, detail="no manual name set for this ip")
+    return {"deleted": ip}
 
 
 # Serve the built frontend (Docker build copies web/dist here). In local dev,
