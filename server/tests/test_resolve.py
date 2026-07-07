@@ -10,6 +10,7 @@ from __future__ import annotations
 import socket
 import struct
 import threading
+import time
 
 import pytest
 
@@ -124,3 +125,53 @@ def test_get_names_excludes_negative_cache_entries(monkeypatch):
     monkeypatch.setattr(resolve, "_lookup", lambda ip, timeout=None: None if ip == "192.168.1.1" else "named.lan")
     resolve.resolve_batch(["192.168.1.1", "192.168.1.2"], now=1000)
     assert resolve.get_names() == {"192.168.1.2": "named.lan"}
+
+
+def test_resolve_batch_does_not_hold_write_lock_during_network_io(monkeypatch):
+    """Regression test: resolve_batch used to keep a single write transaction
+    open for its whole loop, committing only at the very end. So once the
+    FIRST due ip's insert executed, a slow/unreachable resolver for a LATER
+    ip in the same batch held that write lock across its own blocking
+    network I/O — starving concurrent writers (alerts.py/names.py/rollups.py
+    share this store file). Needs two due ips: one that resolves instantly
+    (so its insert lands) and a second that stalls afterwards — a single-ip
+    batch never acquires the lock before the lookup, so wouldn't reproduce
+    the bug at all."""
+    lookup_started = threading.Event()
+    release_lookup = threading.Event()
+
+    def _mixed_lookup(ip, timeout=None):
+        if ip == "192.168.1.50":
+            lookup_started.set()
+            release_lookup.wait(timeout=5)
+            return None
+        return "known.lan"
+
+    monkeypatch.setattr(resolve, "_lookup", _mixed_lookup)
+
+    batch_thread = threading.Thread(
+        target=resolve.resolve_batch,
+        args=(["192.168.1.10", "192.168.1.50"],),
+        kwargs={"now": 1000},
+    )
+    batch_thread.start()
+    try:
+        assert lookup_started.wait(timeout=2), "resolve_batch never reached the stalled lookup"
+
+        start = time.monotonic()
+        with resolve._connect() as conn:
+            conn.execute(
+                "INSERT INTO resolved_names (ip, name, resolved_at, attempts, next_attempt_at) "
+                "VALUES (?, NULL, 0, 0, 0)",
+                ("192.168.1.99",),
+            )
+            conn.commit()
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 1.0, (
+            f"concurrent write took {elapsed:.2f}s — a write transaction is still "
+            "held open during resolve_batch's network I/O"
+        )
+    finally:
+        release_lookup.set()
+        batch_thread.join(timeout=5)
