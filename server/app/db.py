@@ -819,6 +819,14 @@ def timeseries(
     a continuous chart without inferring gaps. When `since` is unknown (range
     "all"), the window is derived from the data's own min/max timestamp.
     """
+    # Unbounded, no client: the rollup cache serves this as day-aligned buckets
+    # (see #2) instead of this function's usual arbitrary-width bucketing --
+    # a deliberate, disclosed behavior change for the "All" range specifically.
+    if client is None and since is None and until is None:
+        from app import rollups
+        served = rollups.read_timeseries()
+        if served is not None:
+            return served
     if detect_schema().has_id_storage:
         return _timeseries_id(client, since, until, buckets)
     _, join = _client_join_sql()
@@ -945,6 +953,12 @@ def client_activity(
     (not just the window), so the frontend can flag genuinely-new devices rather
     than ones that merely happen to be quiet earlier in the range.
     """
+    # Unbounded: same day-aligned rollup fast path as timeseries() (#2).
+    if since is None and until is None:
+        from app import rollups
+        served = rollups.read_client_activity(limit)
+        if served is not None:
+            return served
     if detect_schema().has_id_storage:
         return _client_activity_id(since, until, limit, buckets)
     select, join = _client_join_sql()

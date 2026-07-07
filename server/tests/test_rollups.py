@@ -81,6 +81,32 @@ def test_refresh_matches_summary_all_schemas(ftl, rstore):
     assert sum(a + b for a, b in st["daily"].values()) == trusted["total_queries"]
 
 
+def test_timeseries_and_client_activity_served_from_rollup_all_schemas(ftl, rstore):
+    """#2: the "All" range's timeseries/client_activity, once backfilled, are
+    served from the rollup (day-aligned buckets) rather than the direct scan.
+    Bucket boundaries are deliberately different from the direct path now (see
+    read_timeseries()'s docstring) -- correctness here means totals reconcile
+    against trusted whole-table aggregates, not identical bucket-by-bucket
+    values to the old direct-path shape."""
+    rollups.refresh_rollups()
+    trusted_total = db.count_queries(None, None, None, None, None)
+    trusted_summary = db.summary(None, None, None)
+
+    ts = db.timeseries(None, None, None, buckets=40)
+    assert ts["bucket_seconds"] == 86400
+    assert sum(p["total"] for p in ts["series"]) == trusted_total
+    assert sum(p["allowed"] for p in ts["series"]) + sum(p["blocked"] for p in ts["series"]) \
+        <= trusted_total  # equal unless the fixture has "unknown"-status rows
+    assert sum(p["blocked"] for p in ts["series"]) == trusted_summary["blocked"]
+
+    ca = db.client_activity(None, None, limit=10, buckets=20)
+    assert ca  # the ftl fixture always has clients
+    for c in ca:
+        assert sum(c["sparkline"]) == c["count"]
+    # Ranking matches the trusted top_clients() order (same client_totals source).
+    assert [c["ip"] for c in ca] == [c["ip"] for c in db.top_clients(None, limit=10)]
+
+
 def test_refresh_noop_when_nothing_new(ftl, rstore):
     rollups.refresh_rollups()
     again = rollups.refresh_rollups()
@@ -370,6 +396,26 @@ def test_reconcile_interval_gating_and_force(idb, rstore):
 
     # interval_seconds=0 -> the interval has always "elapsed" -> runs.
     assert rollups.reconcile_rollups(interval_seconds=0)["reconciled"] is True
+
+
+def test_first_boot_refresh_does_not_trigger_immediate_reconcile(ftl, rstore):
+    """#3: a from-scratch refresh_rollups() (true first boot, cursor never
+    initialized) must stamp last_reconciled_at itself, so the very next
+    reconcile_rollups() call in the same scheduler tick sees a fresh stamp and
+    no-ops instead of immediately redoing the exact same full backfill."""
+    first = rollups.refresh_rollups()
+    assert first["processed"] > 0  # the ftl fixture always has queries
+
+    conn = sqlite3.connect(rstore)
+    conn.row_factory = sqlite3.Row
+    meta = conn.execute("SELECT last_reconciled_at FROM rollup_meta WHERE id = 1").fetchone()
+    conn.close()
+    assert meta["last_reconciled_at"] is not None
+
+    # Same tick, immediately after: must be a no-op, not a second full backfill.
+    again = rollups.reconcile_rollups()
+    assert again["reconciled"] is False
+    assert "seconds_until_due" in again
 
 
 def test_reconcile_matches_a_from_empty_refresh(idb, rstore):
