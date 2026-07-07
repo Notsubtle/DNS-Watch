@@ -237,9 +237,12 @@ The app is organised into tabs: a **Dashboard** (everything below down to
      DHCP leases — many don't, in which case this rung silently contributes
      nothing and manual naming is what actually does the work. Point
      `DNSWATCH_REVERSE_DNS_SERVER` (see `.env.example`) at your router's LAN IP if
-     the default resolver comes back empty. mDNS was considered and left out: this
-     container's default bridge network can't see LAN multicast traffic (a real
-     networking trade-off, not a code gap — see `server/app/resolve.py`).
+     the default resolver comes back empty. Each lookup uses a fresh random query
+     id and only accepts a reply from the exact server queried, so another host on
+     the LAN can't race the real answer to inject a spoofed device name. mDNS was
+     considered and left out: this container's default bridge network can't see
+     LAN multicast traffic (a real networking trade-off, not a code gap — see
+     `server/app/resolve.py`).
 - **Vendor identification** — the client detail view shows a device's manufacturer
   when it can be determined: first from Pi-hole's own MAC-vendor lookup, and, when
   that's empty, from a bundled offline IEEE OUI table (regenerated via
@@ -327,8 +330,12 @@ Beyond the dashboard, three purpose-built views for digging into a specific ques
   that's an inherent property of an add-only rollup once Pi-hole prunes its own old
   rows; this means "All" reflects reality within a disclosed staleness window (up to
   ~24h around a prune), not perfectly to-the-second — a deliberate tradeoff for
-  turning a 13–32 second query into a sub-10-millisecond one. Bounded ranges
-  (15m/1h/24h/7d) are untouched by any of this; they were already fast. The
+  turning a 13–32 second query into a sub-10-millisecond one. During the brief
+  window a reconciliation is actually rebuilding the tables from scratch, "All"
+  reads fall back to the direct (slower, always-correct) scan rather than ever
+  serving a partially-rebuilt table, so a rebuild in progress costs latency for
+  that one request, never correctness. Bounded ranges (15m/1h/24h/7d) are
+  untouched by any of this; they were already fast. The
   query-volume timeseries and the per-client activity chart are now served from
   the rollup for "All" too, with one deliberate, visible tradeoff: their buckets
   are whole UTC days (matching the rollup's own day-granularity) instead of the
