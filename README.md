@@ -223,15 +223,23 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   fact.
 - **Client naming** — pulls names Pi-hole already knows first (from DHCP lease /
   your manual naming in Pi-hole's own UI); no separate naming step needed. For
-  clients Pi-hole never names — static-IP or otherwise-quiet devices — DNS Watch
-  does its own reverse-DNS (PTR) lookups in the background, caches results, and
-  backs off automatically on IPs that never answer, so a permanently silent
-  device doesn't get re-queried on every tick. Point `DNSWATCH_REVERSE_DNS_SERVER`
-  (see `.env.example`) at your router's LAN IP if the default resolver comes back
-  empty — many home routers answer PTR queries for their own DHCP leases even when
-  they aren't Pi-hole's configured upstream. mDNS was considered and left out: this
-  container's default bridge network can't see LAN multicast traffic (a real
-  networking trade-off, not a code gap — see `server/app/resolve.py`).
+  clients Pi-hole never names, DNS Watch tries two things, in order:
+  1. **Your own name, if you set one.** Click **🏷 Name Devices** in the header for
+     a list of every known IP — query count, MAC/vendor status, and whatever
+     Pi-hole/reverse-DNS already call it — with an editable name field. A name you
+     set here overrides everything else, everywhere in the dashboard, and stays
+     visible (and deletable) even if that device goes quiet, so a stale override
+     never lingers unnoticed.
+  2. **A background reverse-DNS (PTR) guess**, for anything you haven't named
+     yourself. Results are cached with automatic backoff on IPs that never answer,
+     so a permanently silent device isn't re-queried every tick. In practice this
+     depends entirely on whether your router/DNS server keeps PTR records for its
+     DHCP leases — many don't, in which case this rung silently contributes
+     nothing and manual naming is what actually does the work. Point
+     `DNSWATCH_REVERSE_DNS_SERVER` (see `.env.example`) at your router's LAN IP if
+     the default resolver comes back empty. mDNS was considered and left out: this
+     container's default bridge network can't see LAN multicast traffic (a real
+     networking trade-off, not a code gap — see `server/app/resolve.py`).
 - **Vendor identification** — the client detail view shows a device's manufacturer
   when it can be determined: first from Pi-hole's own MAC-vendor lookup, and, when
   that's empty, from a bundled offline IEEE OUI table (regenerated via
