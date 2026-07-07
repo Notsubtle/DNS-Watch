@@ -244,6 +244,8 @@ def api_simulate_blocklist(body: SimulateRequest):
         return db.simulate_pattern(body.pattern, since)
     except re.error:
         raise HTTPException(status_code=400, detail="Invalid regular expression syntax")
+    except db.SimulationBudgetExceeded as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @app.get("/api/queries.csv")

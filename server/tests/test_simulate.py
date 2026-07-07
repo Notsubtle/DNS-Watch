@@ -37,6 +37,28 @@ def test_invalid_regex_raises_re_error(ftl):
         db.simulate_pattern("(unclosed", since=0)
 
 
+def test_overall_budget_exceeded_raises_instead_of_hanging(ftl, monkeypatch):
+    """Regression test: the per-row `regex` timeout (SECURITY_AUDIT_REPORT.md
+    finding #4) only bounds a SINGLE row's match — it does nothing to cap the
+    aggregate cost across many rows. Force the overall budget down to
+    "already expired" so every row trips it, and confirm simulate_pattern
+    raises rather than silently running the two full scans to completion (or,
+    pre-fix, hanging indefinitely on a pathological pattern)."""
+    from app import db
+
+    monkeypatch.setattr(db, "SIMULATE_BUDGET_SECONDS", -1.0)
+    with pytest.raises(db.SimulationBudgetExceeded):
+        db.simulate_pattern(".", since=0)
+
+
+def test_api_simulate_budget_exceeded_returns_503(client, monkeypatch):
+    from app import db
+
+    monkeypatch.setattr(db, "SIMULATE_BUDGET_SECONDS", -1.0)
+    resp = client.post("/api/simulate-blocklist", json={"pattern": ".", "range": "7d"})
+    assert resp.status_code == 503
+
+
 def test_breakdown_counts_are_exact_not_sampled(ftl):
     """Regression for the per-client-percentage bug: the domain and client
     breakdowns must be EXACT aggregates, not a capped row sample. Every seeded
