@@ -1491,6 +1491,21 @@ def _new_clients_id(after_ts: int) -> list[dict]:
 
 TOP_DOMAINS_LIMIT = 50  # how many matched domains the breakdown returns
 
+# Caps the AGGREGATE wall-clock cost of one simulate_pattern() call, independent
+# of _MATCH_TIMEOUT_SECONDS below (which only bounds a single row). Module-level
+# so tests can monkeypatch it to something tiny rather than waiting out the real
+# budget or crafting a genuinely pathological pattern.
+SIMULATE_BUDGET_SECONDS = 30.0
+
+
+class SimulationBudgetExceeded(Exception):
+    """Raised when one simulate_pattern() call runs past its overall
+    wall-clock budget. The per-row `regex` timeout below only bounds a
+    SINGLE row; it does nothing to cap the aggregate cost of a pattern that
+    reliably hits that per-row timeout across many distinct domains in a
+    busy window (SECURITY_AUDIT_REPORT.md finding #4 only covered the
+    single-row case). main.py maps this to a 503."""
+
 
 def simulate_pattern(pattern: str, since: int) -> dict:
     """Retrospective "how much of the last N days would this Pi-hole-style
@@ -1542,8 +1557,25 @@ def simulate_pattern(pattern: str, since: int) -> dict:
         # unhandled 500.
         raise re.error(str(e)) from e
     _MATCH_TIMEOUT_SECONDS = 0.5
+    # Caps the AGGREGATE cost of the two scans below, independent of the
+    # per-row timeout above. A raised exception inside a SQLite UDF gets
+    # flattened by the sqlite3 module into an indistinguishable
+    # OperationalError ("user-defined function raised exception"), so instead
+    # of raising from _regexp itself, it trips this flag and returns a cheap
+    # non-match for every remaining row (no more regex evaluation, just a
+    # monotonic-clock comparison) — the query still finishes quickly, and the
+    # budget breach is raised as a real Python exception afterwards, once
+    # SQLite is done with it.
+    deadline = time.monotonic() + SIMULATE_BUDGET_SECONDS
+    budget_exceeded = False
 
     def _regexp(_pattern_arg: str, value: str | None) -> int:
+        nonlocal budget_exceeded
+        if budget_exceeded:
+            return 0
+        if time.monotonic() > deadline:
+            budget_exceeded = True
+            return 0
         try:
             return 1 if timed.search(value or "", timeout=_MATCH_TIMEOUT_SECONDS) else 0
         except TimeoutError:
@@ -1570,6 +1602,12 @@ def simulate_pattern(pattern: str, since: int) -> dict:
             f"FROM queries q {join} WHERE {where_sql} GROUP BY {_client_ip_col()}",
             [since, pattern],
         ).fetchall()
+
+    if budget_exceeded:
+        raise SimulationBudgetExceeded(
+            f"pattern evaluation exceeded the {SIMULATE_BUDGET_SECONDS:.0f}s overall "
+            "budget — try a more specific pattern"
+        )
 
     total_matches = sum(r["n"] for r in domain_rows)
     unique_domains = len(domain_rows)

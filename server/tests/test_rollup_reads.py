@@ -338,6 +338,39 @@ def test_unbackfilled_rollup_falls_through(idb, rstore):
     )
 
 
+def test_mid_reconcile_falls_through_instead_of_serving_partial_data(idb, rstore):
+    """Regression test: reconcile_rollups() truncates every rollup table and
+    rewinds the cursor to NULL, then re-drains the whole table batch by batch.
+    The cursor goes non-NULL again after just the FIRST batch commits -- long
+    before the tables reflect the whole history again. A reader gating only on
+    "cursor is non-NULL" would see a fully-backfilled rollup mid-rebuild and
+    serve wildly undercounted totals instead of falling through to the
+    correct-but-slow direct scan. Simulates that window directly (rather than
+    racing threads against a real multi-batch rebuild) by fully backfilling,
+    then raising the reconcile_in_progress flag the same way reconcile_rollups()
+    does for the duration of its rebuild."""
+    _build_idstore_with_traps(idb, _NOW - 5 * 86400, _NOW)
+    rollups.refresh_rollups()
+    assert rollups.read_summary() is not None  # fully backfilled, ready
+
+    conn = sqlite3.connect(rstore)
+    conn.execute("UPDATE rollup_meta SET reconcile_in_progress = 1 WHERE id = 1")
+    conn.commit()
+    conn.close()
+
+    # Every read must signal "not ready" while a rebuild is in flight, exactly
+    # like the never-backfilled case -- NOT serve the stale/partial tables.
+    assert rollups.read_summary() is None
+    assert rollups.read_top_domains(None, 15) is None
+    assert rollups.read_top_domains(_DUP_IP, 15) is None
+    assert rollups.read_top_clients(15) is None
+    assert rollups.read_query_types() is None
+
+    # So db.py still serves the correct direct result for the All range.
+    assert db.summary(None, None, None) == db._summary_id(None, None, None)
+    assert db.summary(None, None, None)["total_queries"] > 0
+
+
 # --------------------------------------------------------------------------
 # Bounded ranges must NEVER touch the rollup cache (it only serves the All
 # range). Spy on every read function and assert none fire for a bounded call --

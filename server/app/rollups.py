@@ -190,6 +190,14 @@ def init_rollup_store() -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(daily_totals)")}
         if "unknown_count" not in cols:
             conn.execute("ALTER TABLE daily_totals ADD COLUMN unknown_count INTEGER NOT NULL DEFAULT 0")
+        # rollup_meta predates reconcile_in_progress -- see reconcile_rollups()
+        # and the read-path gating below for why this flag exists. Same
+        # ALTER-on-existing-table pattern as unknown_count above.
+        meta_cols = {r["name"] for r in conn.execute("PRAGMA table_info(rollup_meta)")}
+        if "reconcile_in_progress" not in meta_cols:
+            conn.execute(
+                "ALTER TABLE rollup_meta ADD COLUMN reconcile_in_progress INTEGER NOT NULL DEFAULT 0"
+            )
         conn.commit()
 
 
@@ -537,29 +545,19 @@ def reconcile_rollups(interval_seconds: int = 86400, force: bool = False) -> dic
 
       A temp-table-into-atomic-swap design would additionally guarantee that a
       concurrent READER never observes the tables mid-rebuild (empty then
-      climbing for the ~8s a full rebuild takes at real scale). That guarantee
-      is deliberately NOT built here, for concrete structural reasons rather than
-      to save effort:
-
-        1. Nothing reads these tables yet -- the dashboard read path is a
-           separate, later task -- so there is no reader to protect today.
-        2. This store file is SHARED with alerts.py's rule/event/settings
-           tables, so a whole-file swap (build a sibling db, os.replace it in) is
-           out -- it would clobber unrelated state.
-        3. A same-file shadow-table swap (build into `*_new` tables, RENAME them
-           over the live ones in one txn) would force refresh_rollups to write to
-           a configurable table namespace and cursor -- i.e. parameterizing the
-           one component already verified at 764k-row scale -- for a benefit no
-           current consumer can observe. The task's own constraint is to reuse
-           refresh_rollups' batch/transaction logic verbatim, not fork it.
-
-      The right time to add zero-window swap semantics is WHEN the read path is
-      built, designed together with it (e.g. switch this store to WAL so a single
-      long rebuild txn lets readers keep seeing the last committed snapshot, or
-      add shadow tables and a read indirection as one unit). Pre-building that
-      machinery now would be speculative complexity around the most
-      correctness-sensitive code in the module. This deferral is intentional and
-      flagged, not an oversight.
+      climbing for the ~8s a full rebuild takes at real scale). That's a real
+      structural cost this design accepts (shared store file rules out a
+      whole-file swap; a same-file shadow-table swap would force
+      refresh_rollups to parameterize its table namespace/cursor for a benefit
+      no current consumer needs, forking the one component already verified at
+      764k-row scale). Instead, the READ PATHS below gate on a
+      `reconcile_in_progress` flag (set/cleared here, spanning the whole
+      rebuild) rather than only on the cursor being non-NULL: without it, a
+      reader would see the cursor go non-NULL again after the rebuild's FIRST
+      batch commits and serve mostly-empty tables as if they were the whole
+      truth for the rest of the rebuild. The flag is set atomically with the
+      truncate/cursor-rewind below, so there's no window where the cursor is
+      NULL-but-not-yet-flagged either.
     """
     init_rollup_store()
     now = time.time()
@@ -573,8 +571,9 @@ def reconcile_rollups(interval_seconds: int = 86400, force: bool = False) -> dic
             "seconds_until_due": interval_seconds - (now - last),
         }
 
-    # Atomic reset: clear every rollup table AND rewind the cursor together, so
-    # the "nothing processed" state is all-or-nothing (see docstring).
+    # Atomic reset: clear every rollup table, rewind the cursor, AND raise the
+    # in-progress flag together, so "nothing processed, rebuild underway" is
+    # all-or-nothing (see docstring).
     with _connect() as conn:
         conn.execute("BEGIN")
         for table in _ROLLUP_TABLES:
@@ -583,17 +582,21 @@ def reconcile_rollups(interval_seconds: int = 86400, force: bool = False) -> dic
             "UPDATE rollup_cursor SET last_query_id = NULL, last_query_timestamp = NULL "
             "WHERE id = 1"
         )
+        conn.execute("UPDATE rollup_meta SET reconcile_in_progress = 1 WHERE id = 1")
         conn.commit()
 
     # Rebuild from scratch using the SAME incremental drain as the initial
     # backfill -- not a reimplementation of it.
     result = refresh_rollups()
 
-    # Stamp completion only after a fully successful rebuild, so an interrupted
-    # run leaves the old stamp and reconciles again next tick.
+    # Stamp completion AND clear the in-progress flag only after a fully
+    # successful rebuild, so an interrupted run leaves both the old stamp and
+    # the flag set -- reads keep falling through to the direct scan, and the
+    # next tick reconciles (and re-flags) again from scratch.
     with _connect() as conn:
         conn.execute(
-            "UPDATE rollup_meta SET last_reconciled_at = ? WHERE id = 1", [now]
+            "UPDATE rollup_meta SET last_reconciled_at = ?, reconcile_in_progress = 0 WHERE id = 1",
+            [now],
         )
         conn.commit()
 
@@ -648,6 +651,22 @@ def _rollups_backfilled(conn: sqlite3.Connection) -> bool:
     return row is not None and row["last_query_id"] is not None
 
 
+def _rollups_ready(conn: sqlite3.Connection) -> bool:
+    """True when the rollup tables are both backfilled AND not mid-rebuild.
+    reconcile_rollups() truncates every table and rewinds the cursor to NULL,
+    then re-drains the whole table batch by batch -- the cursor goes non-NULL
+    again after just the FIRST batch commits, long before the tables reflect
+    the whole history again. Without this second check, a reader hitting the
+    "All" range mid-rebuild would see _rollups_backfilled() = True and serve
+    mostly-empty tables as if they were complete."""
+    if not _rollups_backfilled(conn):
+        return False
+    row = conn.execute(
+        "SELECT reconcile_in_progress FROM rollup_meta WHERE id = 1"
+    ).fetchone()
+    return row is None or not row["reconcile_in_progress"]
+
+
 def _total_rows(conn: sqlite3.Connection) -> int:
     """Every query the rollup has processed, counted once. query_type_totals is
     the right source: _Deltas.add increments it for EVERY row unconditionally
@@ -672,7 +691,7 @@ def read_summary() -> dict | None:
     skipping NULLs."""
     init_rollup_store()
     with _connect() as conn:
-        if not _rollups_backfilled(conn):
+        if not _rollups_ready(conn):
             return None
         total = _total_rows(conn)
         blocked = conn.execute(
@@ -707,7 +726,7 @@ def read_top_domains(client: str | None, limit: int) -> list[dict] | None:
     client_totals has zero rows -> [] (same as the direct path's unknown ip)."""
     init_rollup_store()
     with _connect() as conn:
-        if not _rollups_backfilled(conn):
+        if not _rollups_ready(conn):
             return None
         if client is None:
             rows = conn.execute(
@@ -743,7 +762,7 @@ def read_top_clients(limit: int) -> list[dict] | None:
     name, so `name or ip` matches."""
     init_rollup_store()
     with _connect() as conn:
-        if not _rollups_backfilled(conn):
+        if not _rollups_ready(conn):
             return None
         rows = conn.execute(
             "SELECT ip, count, name FROM client_totals"
@@ -768,7 +787,7 @@ def read_query_types() -> list[dict] | None:
     the direct path (ties, as in SQL's ORDER BY, are unordered among equals)."""
     init_rollup_store()
     with _connect() as conn:
-        if not _rollups_backfilled(conn):
+        if not _rollups_ready(conn):
             return None
         rows = conn.execute(
             "SELECT type, count FROM query_type_totals"
@@ -815,7 +834,7 @@ def read_timeseries() -> dict | None:
     matches direct COUNT(*) exactly -- see unknown_count's own comment."""
     init_rollup_store()
     with _connect() as conn:
-        if not _rollups_backfilled(conn):
+        if not _rollups_ready(conn):
             return None
         days = _all_range_days(conn)
         if days is None:
@@ -853,7 +872,7 @@ def read_client_activity(limit: int) -> list[dict] | None:
     Same day-aligned bucketing tradeoff as read_timeseries() -- see #2."""
     init_rollup_store()
     with _connect() as conn:
-        if not _rollups_backfilled(conn):
+        if not _rollups_ready(conn):
             return None
         days = _all_range_days(conn)
         if days is None:
