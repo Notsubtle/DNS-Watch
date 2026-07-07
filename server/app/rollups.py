@@ -82,7 +82,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 
-from app import db
+from app import db, names, resolve
 
 # Same physical database file as alerts.py's rule/event store. Defined here
 # (rather than imported) so tests can monkeypatch this module's path in
@@ -738,9 +738,12 @@ def read_top_clients(limit: int) -> list[dict] | None:
     one resolved ip (dup-ip ids merged at write time), so counts need no further
     merge. Orphaned-client rows -- excluded from client_totals -- are recovered
     as the single {ip: None, name: None} group the direct path emits (total rows
-    minus resolved-client rows). name mirrors the direct path's
-    `namemap.get(ip) or ip`: client_totals.name is that same network_addresses
-    name, so `name or ip` matches."""
+    minus resolved-client rows). name goes through the SAME precedence the direct
+    path's _display_name applies -- manual override (names.py), else Pi-hole's
+    own name (client_totals.name), else DNS Watch's reverse-DNS cache
+    (resolve.py), else the bare ip -- rather than only ever falling back to the
+    ip, so a manually-named or PTR-resolved client shows its friendly name on
+    the All-time view exactly as it already does on every bounded range."""
     init_rollup_store()
     with _connect() as conn:
         if not _rollups_backfilled(conn):
@@ -749,8 +752,10 @@ def read_top_clients(limit: int) -> list[dict] | None:
             "SELECT ip, count, name FROM client_totals"
         ).fetchall()
         orphan_n = _total_rows(conn) - sum(r["count"] for r in rows)
+    resolved = resolve.get_names()
+    manual = names.get_names()
     out = [
-        {"ip": r["ip"], "name": r["name"] or r["ip"], "count": r["count"]}
+        {"ip": r["ip"], "name": db._display_name(r["name"], r["ip"], resolved, manual), "count": r["count"]}
         for r in rows
     ]
     if orphan_n > 0:
@@ -877,10 +882,15 @@ def read_client_activity(limit: int) -> list[dict] | None:
         idx = day_index.get(r["day"])
         if idx is not None:  # guards a day outside the computed range, e.g. clock skew
             spark_by_ip[r["ip"]][idx] = r["count"]
+    # Same name precedence as read_top_clients() / the direct path's
+    # _display_name -- manual override, else Pi-hole's name, else the
+    # reverse-DNS cache, else the bare ip.
+    resolved = resolve.get_names()
+    manual = names.get_names()
     return [
         {
             "ip": t["ip"],
-            "name": t["name"] or t["ip"],
+            "name": db._display_name(t["name"], t["ip"], resolved, manual),
             "count": t["count"],
             "first_seen": t["first_seen"],
             "last_seen": t["last_seen"],

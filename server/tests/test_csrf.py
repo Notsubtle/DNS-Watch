@@ -71,3 +71,24 @@ def test_same_origin_referer_allowed(client):
 def test_get_requests_not_subject_to_csrf_guard(client):
     r = client.get("/api/summary?range=1h", headers={"Origin": "http://evil.example"})
     assert r.status_code == 200
+
+
+def test_cross_origin_get_alerts_rejected(client):
+    """Regression: unlike every other GET endpoint, GET /api/alerts evaluates
+    alert rules on every call (writing alert_events rows, potentially firing a
+    webhook) — a real side effect a cross-origin page could trigger just by
+    getting the victim's browser to issue this "read-only-looking" request.
+    It needs the same cross-origin rejection as an actual state-changing
+    method even though its HTTP verb says otherwise."""
+    r = client.get("/api/alerts", headers={"Origin": "http://evil.example"})
+    assert r.status_code == 403
+
+
+def test_same_origin_get_alerts_allowed(client):
+    r = client.get("/api/alerts", headers={"Origin": "http://testserver"})
+    assert r.status_code == 200
+
+
+def test_get_alerts_without_origin_or_referer_allowed(client):
+    r = client.get("/api/alerts")
+    assert r.status_code == 200
