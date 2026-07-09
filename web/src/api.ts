@@ -109,6 +109,7 @@ export type RuleType =
   | "domain_keyword"
   | "device_quiet"
   | "new_vendor"
+  | "doh_provider"
   | "digest";
 
 export interface AlertRule {

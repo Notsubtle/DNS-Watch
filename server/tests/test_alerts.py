@@ -180,6 +180,64 @@ def test_new_vendor_rule_noop_without_vendor_data(client, ftl):
     assert not any(e["type"] == "new_vendor" for e in events)
 
 
+def test_doh_provider_rule_fires_for_known_provider_domain(client, ftl):
+    """#33 (scope-corrected): flags a client querying a well-known DoH/DoT
+    provider's OWN domain (e.g. dns.google) -- a proxy "may be setting up or
+    falling back to a resolver that bypasses Pi-hole" signal, honestly worded
+    as exactly that, never as "bypass detected" (see db.DOH_PROVIDER_DOMAINS'
+    module note for why that stronger claim would be false)."""
+    import sqlite3
+    from conftest import CLIENTS, _idstore_client_id, _idstore_domain_id
+
+    now = int(time.time())
+    conn = sqlite3.connect(ftl["path"])
+    ip, name = CLIENTS[0]
+    if ftl["schema"] == "new":
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,1)",
+            (now, 1, 2, "dns.google"),
+        )
+    elif ftl["schema"] == "idstore":
+        cur = conn.cursor()
+        cid = _idstore_client_id(cur, ip, name)
+        did = _idstore_domain_id(cur, "dns.google")
+        conn.execute(
+            "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (now, 1, 2, did, cid),
+        )
+    else:  # "old" / "real"
+        ts = float(now) if ftl["schema"] == "real" else now
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (ts, 1, 2, "dns.google", ip),
+        )
+    conn.commit()
+    conn.close()
+
+    client.post("/api/alert-rules", json={
+        "name": "DoH", "type": "doh_provider", "params": {"window_minutes": 60}})
+    events = client.get("/api/alerts").json()["events"]
+    doh_events = [e for e in events if e["type"] == "doh_provider"]
+
+    assert doh_events, "expected a doh_provider event to fire"
+    msg = doh_events[0]["message"].lower()
+    assert "dns.google" in msg
+    assert ip in doh_events[0]["message"]
+    # Honesty check: must read as a proxy signal, never a confirmed finding.
+    assert "bypass" not in msg or "not" in msg or "may" in msg
+    assert "detected" not in msg
+
+
+def test_doh_provider_rule_quiet_when_no_provider_queries(client, ftl):
+    """A client that never queries a known DoH/DoT provider domain must not
+    trip this rule -- ordinary traffic (build_ftl's fixture domains) isn't a
+    known provider domain, so this should stay silent by default."""
+    client.post("/api/alert-rules", json={
+        "name": "DoH", "type": "doh_provider", "params": {"window_minutes": 6000}})
+    events = client.get("/api/alerts").json()["events"]
+    assert not any(e["type"] == "doh_provider" for e in events)
+
+
 def test_digest_rule_fires_once_per_period_then_on_rollover(ftl, store, monkeypatch):
     """#30: digest firing is gated on a UTC calendar period, not elapsed-time
     cooldown -- verify it fires once, stays silent on a repeat eval within the

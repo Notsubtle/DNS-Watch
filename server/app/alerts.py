@@ -34,7 +34,10 @@ STORE_PATH = os.environ.get("DNSWATCH_DB_PATH", "/data/dnswatch.db")
 # the same event.
 _eval_lock = threading.Lock()
 
-VALID_TYPES = {"volume_threshold", "new_device", "domain_keyword", "device_quiet", "new_vendor", "digest"}
+VALID_TYPES = {
+    "volume_threshold", "new_device", "domain_keyword", "device_quiet",
+    "new_vendor", "doh_provider", "digest",
+}
 
 # Webhook payload shapes. "generic" is DNS Watch's own JSON; "slack"/"discord"
 # emit exactly the single field each of those incoming-webhook APIs requires.
@@ -51,6 +54,7 @@ DEFAULT_COOLDOWN = {
     "domain_keyword": 900,
     "device_quiet": 3600,
     "new_vendor": 86400,
+    "doh_provider": 86400,
     # No entry for "digest": its firing is gated on a calendar-period
     # boundary (see digest_schedule / _dedup_exists below), not an
     # elapsed-time cooldown, since that's the whole point of a digest.
@@ -575,6 +579,21 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
             else:
                 message = f"New vendor on the network: {c['vendor']} — {c['name']} ({c['ip']})"
             _emit(pending, rule, "info", message, f"vendor:{rule['id']}:{c['ip']}")
+
+    elif rule["type"] == "doh_provider":
+        # See db.DOH_PROVIDER_DOMAINS's module note: this detects a client
+        # querying a known DoH/DoT provider's OWN domain (setup/fallback
+        # lookups Pi-hole can still see), NOT actual DoH/VPN bypass traffic
+        # -- that traffic, by definition, never reaches Pi-hole at all.
+        window_min = int(p.get("window_minutes", 60))
+        since = now - window_min * 60
+        for hit in db.doh_provider_hits(since):
+            _emit(pending, rule, "warning",
+                  f"{hit['name']} ({hit['ip']}) queried known DoH/DoT provider domain "
+                  f"{hit['provider']} ({hit['count']}x in {window_min}m) — this device may be "
+                  f"setting up or falling back to a DNS resolver that bypasses Pi-hole, "
+                  f"not confirmation that it has",
+                  f"doh:{rule['id']}:{hit['ip']}:{hit['provider']}")
 
     elif rule["type"] == "device_quiet":
         # Fire when a client that was active in the *prior* window has gone

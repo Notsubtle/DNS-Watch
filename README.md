@@ -210,6 +210,17 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   Rules and events are stored in DNS Watch's **own** writable SQLite database
   (`DNSWATCH_DB_PATH`, default `/data/dnswatch.db`, mounted as the `dnswatch-data`
   volume) — Pi-hole's database is still only ever opened read-only.
+- **Known DoH/DoT provider query** — flags when a client queries a well-known
+  DNS-over-HTTPS/TLS provider's own domain (Cloudflare, Google, OpenDNS, Quad9,
+  NextDNS, AdGuard DNS, and a few others — a small maintained list, not
+  user-configurable in v1). To be honest about what this actually is: it
+  detects a device's own DoH/DoT **setup or periodic fallback lookups** — the
+  handful of plain-DNS queries a client still makes on its way to/around a
+  DoH switchover — **not** the bypass traffic itself. Once a device fully
+  commits to routing DNS through DoH or a VPN, none of that traffic is
+  visible to Pi-hole at all (see "Honest scope" above), so this rule can
+  never detect that outright; it's a proxy signal ("this device *may* be
+  about to route some DNS around Pi-hole"), not a bypass detector.
 - **Digest alerts** — an optional daily or weekly rollup ("here's what happened"),
   instead of every rule firing its own webhook the moment it trips. Summarizes
   alert events fired and new devices seen since the last digest, delivered

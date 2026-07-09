@@ -1574,6 +1574,147 @@ def vendor_alert_candidates(after_ts: int) -> list[dict]:
     return out
 
 
+# --------------------------------------------------------------------------
+# DoH/DoT provider detection (#33, scope-corrected)
+#
+# This does NOT detect DNS-over-HTTPS/VPN *bypass* traffic itself -- once a
+# device fully commits to routing its DNS through DoH/DoT (or a full-tunnel
+# VPN), none of that traffic is plain DNS anymore, so nothing reaches
+# Pi-hole to see it (see README's "Honest scope" note, which already
+# discloses this blind spot). What IS still visible is a client querying one
+# of a well-known provider's OWN domains -- the DoH/DoT setup/provisioning
+# handshake, or a periodic plain-DNS fallback query some clients keep making
+# even after switching over. That is a legitimate, narrow, proxy signal
+# ("this device may be about to route some DNS around Pi-hole"), and this
+# module is careful to only ever claim exactly that, not "bypass detected".
+#
+# Deliberately a small maintained constant, not user-configurable in v1 --
+# matching the OUI/vendor fallback table's precedent elsewhere in this file.
+# --------------------------------------------------------------------------
+
+DOH_PROVIDER_DOMAINS = {
+    "cloudflare-dns.com",     # Cloudflare 1.1.1.1 (incl. mozilla.cloudflare-dns.com, Firefox's TRR)
+    "dns.google",             # Google Public DNS
+    "doh.opendns.com",        # Cisco OpenDNS
+    "dns.opendns.com",
+    "dns.quad9.net",          # Quad9
+    "doh.cleanbrowsing.org",  # CleanBrowsing
+    "dns.nextdns.io",         # NextDNS (per-user config is a subdomain of this)
+    "dns.adguard.com",        # AdGuard DNS
+    "doh.libredns.gr",        # LibreDNS
+}
+
+
+def _match_doh_provider(domain: str | None) -> str | None:
+    """The known provider domain `domain` belongs to (exact match or a
+    subdomain of one), or None. Suffix matching (rather than an unbounded
+    LIKE %provider%) is deliberate -- e.g. NextDNS issues each user a
+    subdomain like abc123.dns.nextdns.io, and this must not accidentally
+    match an unrelated domain that merely contains "dns.google" as a
+    substring somewhere in an unrelated label."""
+    if not domain:
+        return None
+    d = domain.lower()
+    for p in DOH_PROVIDER_DOMAINS:
+        if d == p or d.endswith("." + p):
+            return p
+    return None
+
+
+def _merge_doh_hit(merged: dict, ip: str | None, name, provider: str | None, count: int, last_seen) -> None:
+    if not ip or not provider:
+        return
+    key = (ip, provider)
+    if key in merged:
+        merged[key]["count"] += count
+        merged[key]["last_seen"] = max(merged[key]["last_seen"], last_seen)
+    else:
+        merged[key] = {"ip": ip, "name": name, "provider": provider, "count": count, "last_seen": last_seen}
+
+
+def doh_provider_hits(since: int) -> list[dict]:
+    """Clients that queried a known DoH/DoT provider's own domain at or after
+    `since` (see DOH_PROVIDER_DOMAINS and the module note above for exactly
+    what this is -- and is NOT -- evidence of).
+
+    One entry per (client, matched provider domain): {"ip", "name",
+    "provider", "count", "last_seen"}, most-recent first. Matching is an
+    exact/suffix check against the small fixed provider list (see
+    _match_doh_provider), not an unbounded substring LIKE scan.
+    """
+    if detect_schema().has_id_storage:
+        return _doh_provider_hits_id(since)
+    select, join = _client_join_sql()
+    conds = []
+    params: list = [since]
+    for p in DOH_PROVIDER_DOMAINS:
+        conds.append("q.domain = ? OR q.domain LIKE ?")
+        params.append(p)
+        params.append(f"%.{p}")
+    where_domains = " OR ".join(f"({c})" for c in conds)
+    sql = f"""
+        SELECT {select}, q.domain AS domain, MAX(q.timestamp) AS last_seen, COUNT(*) AS n
+        FROM queries q
+        {join}
+        WHERE q.timestamp >= ? AND ({where_domains})
+        GROUP BY {_client_ip_col()}, q.domain
+    """
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    resolved = resolve.get_names()
+    manual = names.get_names()
+    merged: dict = {}
+    for r in rows:
+        provider = _match_doh_provider(r["domain"])
+        name = _display_name(r["client_name"], r["client_ip"], resolved, manual)
+        _merge_doh_hit(merged, r["client_ip"], name, provider, r["n"], r["last_seen"])
+    out = list(merged.values())
+    out.sort(key=lambda c: c["last_seen"], reverse=True)
+    return out
+
+
+def _doh_provider_hits_id(since: int) -> list[dict]:
+    """doh_provider_hits fast path for the normalized (has_id_storage) schema:
+    resolve matching domain ids from domain_by_id once (a small, fixed
+    provider list -- never an unbounded scan), then filter query_storage on
+    those raw ids directly, mirroring count_queries's domain-filter fast path."""
+    with _connect() as conn:
+        conds = []
+        params: list = []
+        for p in DOH_PROVIDER_DOMAINS:
+            conds.append("domain = ? OR domain LIKE ?")
+            params.append(p)
+            params.append(f"%.{p}")
+        where_domains = " OR ".join(f"({c})" for c in conds)
+        domain_rows = conn.execute(
+            f"SELECT id, domain FROM domain_by_id WHERE {where_domains}", params
+        ).fetchall()
+        if not domain_rows:
+            return []
+        domain_provider = {r["id"]: _match_doh_provider(r["domain"]) for r in domain_rows}
+        ids = list(domain_provider.keys())
+        ph = ",".join("?" for _ in ids)
+        rows = conn.execute(
+            f"SELECT q.client AS cid, q.domain AS did, MAX(q.timestamp) AS last_seen, COUNT(*) AS n "
+            f"FROM query_storage q WHERE q.domain IN ({ph}) AND q.timestamp >= ? "
+            f"GROUP BY q.client, q.domain",
+            [*ids, since],
+        ).fetchall()
+        ipmap = _client_ip_map(conn)
+        namemap = _client_name_map(conn)
+    resolved = resolve.get_names()
+    manual = names.get_names()
+    merged: dict = {}
+    for r in rows:
+        ip = _resolve_client_value(r["cid"], ipmap)
+        provider = domain_provider.get(r["did"])
+        name = _display_name(namemap.get(ip), ip, resolved, manual) if ip else None
+        _merge_doh_hit(merged, ip, name, provider, r["n"], r["last_seen"])
+    out = list(merged.values())
+    out.sort(key=lambda c: c["last_seen"], reverse=True)
+    return out
+
+
 TOP_DOMAINS_LIMIT = 50  # how many matched domains the breakdown returns
 
 # Caps the AGGREGATE wall-clock cost of one simulate_pattern() call, independent
