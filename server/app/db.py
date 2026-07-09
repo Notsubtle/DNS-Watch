@@ -182,7 +182,7 @@ def _status_where(status: str | None) -> str | None:
 
 
 def _build_where(
-    client: str | None = None,
+    client: str | list[str] | None = None,
     domain: str | None = None,
     status: str | None = None,
     since: int | None = None,
@@ -194,10 +194,24 @@ def _build_where(
     added in one place can't silently diverge from the totals shown elsewhere.
     Returns (where_sql, params); where_sql always starts with "1=1" so callers
     can drop it into `WHERE {where_sql}` unconditionally.
+
+    `client` is either a single ip (the original, single-device filter) or a
+    list of ips (a tag/group's members — #31), so callers don't need two
+    separate code paths. An empty list means "a real tag with no members" and
+    correctly matches nothing, the same way a single unknown ip already
+    matches nothing today.
     """
     where = ["1=1"]
     params: list = []
-    if client:
+    if isinstance(client, (list, tuple, set)):
+        client = list(client)
+        if not client:
+            where.append("0")
+        else:
+            placeholders = ",".join("?" for _ in client)
+            where.append(f"{_client_ip_col()} IN ({placeholders})")
+            params.extend(client)
+    elif client:
         where.append(f"{_client_ip_col()} = ?")
         params.append(client)
     if domain:
@@ -250,6 +264,31 @@ def _client_ids_for_ip(conn: sqlite3.Connection, ip: str) -> list[int]:
     """Every client_by_id.id whose ip matches `ip` (usually one, but the ip
     column is not unique — see module note above)."""
     return [r["id"] for r in conn.execute("SELECT id FROM client_by_id WHERE ip = ?", [ip])]
+
+
+def _client_ids_for_client_filter(
+    conn: sqlite3.Connection, client: str | list[str] | None
+) -> list[int] | None:
+    """Resolves an aggregate function's `client` filter (a single ip, a list
+    of ips from a tag/group — #31, or None for "no filter") into the flat
+    list of client_by_id ids `_id_where` expects. None passes through
+    unchanged (no filter at all); a real but empty list (a tag with no
+    members) correctly returns an empty list, which `_id_where` already
+    treats as "match nothing" rather than "no filter"."""
+    if isinstance(client, (list, tuple, set)):
+        ips = list(client)
+        if not ips:
+            return []
+        placeholders = ",".join("?" for _ in ips)
+        return [
+            r["id"]
+            for r in conn.execute(f"SELECT id FROM client_by_id WHERE ip IN ({placeholders})", ips)
+        ]
+    # A single ip, matching _build_where's own `if client:` falsy check --
+    # None or an empty string both mean "no filter", not "filter to nothing".
+    if not client:
+        return None
+    return _client_ids_for_ip(conn, client)
 
 
 def _client_ip_map(conn: sqlite3.Connection) -> dict[int, str]:
@@ -535,7 +574,7 @@ def device_name_rows() -> list[dict]:
 
 
 def list_queries(
-    client: str | None,
+    client: str | list[str] | None,
     domain: str | None,
     status: str | None,
     since: int | None,
@@ -626,7 +665,7 @@ def tail_queries(since: float, since_id: int, limit: int = 500) -> list[dict]:
 
 
 def count_queries(
-    client: str | None,
+    client: str | list[str] | None,
     domain: str | None,
     status: str | None,
     since: int | None,
@@ -646,7 +685,7 @@ def count_queries(
 
 
 def _count_queries_id(
-    client: str | None,
+    client: str | list[str] | None,
     domain: str | None,
     status: str | None,
     since: int | None,
@@ -671,7 +710,7 @@ def _count_queries_id(
     makes.
     """
     with _connect() as conn:
-        client_ids = _client_ids_for_ip(conn, client) if client else None
+        client_ids = _client_ids_for_client_filter(conn, client)
         where_sql, params = _id_where(client_ids, since, until, status)
         if domain:
             where_sql += " AND q.domain IN (SELECT id FROM domain_by_id WHERE domain LIKE ?)"
@@ -680,7 +719,7 @@ def _count_queries_id(
         return conn.execute(sql, params).fetchone()["n"]
 
 
-def summary(client: str | None, since: int | None, until: int | None) -> dict:
+def summary(client: str | list[str] | None, since: int | None, until: int | None) -> dict:
     # Unbounded whole-db summary is precomputed in the rollup cache. A client
     # filter or any bound is NOT servable from it (no per-client breakdown; a
     # bound isn't the "All" range) -- those fall straight through unchanged.
@@ -722,7 +761,7 @@ def summary(client: str | None, since: int | None, until: int | None) -> dict:
     }
 
 
-def _summary_id(client: str | None, since: int | None, until: int | None) -> dict:
+def _summary_id(client: str | list[str] | None, since: int | None, until: int | None) -> dict:
     """Fast path for summary. total/blocked/unique_domains come from a single
     subquery-free scan of query_storage's raw columns. unique_domains counts
     DISTINCT resolved domains, matching the view's COUNT(DISTINCT domain): the
@@ -740,7 +779,7 @@ def _summary_id(client: str | None, since: int | None, until: int | None) -> dic
     NULLs."""
     blocked_in = ",".join(str(s) for s in BLOCKED_STATUSES)
     with _connect() as conn:
-        client_ids = _client_ids_for_ip(conn, client) if client else None
+        client_ids = _client_ids_for_client_filter(conn, client)
         where_sql, params = _id_where(client_ids=client_ids, since=since, until=until)
         r = conn.execute(
             f"""
@@ -774,10 +813,13 @@ def _summary_id(client: str | None, since: int | None, until: int | None) -> dic
     }
 
 
-def top_domains(client: str | None, since: int | None, limit: int = 15) -> list[dict]:
+def top_domains(client: str | list[str] | None, since: int | None, limit: int = 15) -> list[dict]:
     # Unbounded: served from domain_totals (client is None) or client_domain_rollup
-    # (client set) -- both cover the "All" range. Any bound falls through unchanged.
-    if since is None:
+    # (a single client set) -- both cover the "All" range. A tag/group (client is
+    # a list -- #31) has no per-tag rollup table, so that falls through to the
+    # direct scan just like a bound does; only None or one plain ip can use this
+    # rollup path.
+    if since is None and not isinstance(client, (list, tuple, set)):
         from app import rollups
         served = rollups.read_top_domains(client, limit)
         if served is not None:
@@ -802,7 +844,7 @@ def top_domains(client: str | None, since: int | None, limit: int = 15) -> list[
     return [{"domain": r["domain"], "count": r["n"]} for r in rows]
 
 
-def _top_domains_id(client: str | None, since: int | None, limit: int) -> list[dict]:
+def _top_domains_id(client: str | list[str] | None, since: int | None, limit: int) -> list[dict]:
     """Fast path: GROUP BY the raw integer domain id on query_storage. Resolvable
     ids are a bijection with their text (domain_by_id.domain is UNIQUE), so each
     is its own group and never merges with another -- the INNER JOIN yields the
@@ -819,7 +861,7 @@ def _top_domains_id(client: str | None, since: int | None, limit: int) -> list[d
     then folded in as a single {domain: None} entry before the final sort/limit,
     reproducing the view's single-NULL-group semantics exactly."""
     with _connect() as conn:
-        client_ids = _client_ids_for_ip(conn, client) if client else None
+        client_ids = _client_ids_for_client_filter(conn, client)
         where_sql, params = _id_where(client_ids=client_ids, since=since)
         # Non-orphan domains: bijection, so raw-id groups == resolved-text groups.
         # LIMIT here is safe -- at most `limit` of these can survive the final cut,
@@ -919,7 +961,7 @@ def _top_clients_id(since: int | None, limit: int) -> list[dict]:
     ]
 
 
-def query_types(client: str | None, since: int | None, until: int | None = None) -> list[dict]:
+def query_types(client: str | list[str] | None, since: int | None, until: int | None = None) -> list[dict]:
     """Count of queries grouped by FTL query type, most frequent first."""
     # Unbounded, no client: query_type_totals holds this exactly. A client filter
     # has no rollup breakdown (would need a new table), and a bound isn't the
@@ -949,11 +991,11 @@ def query_types(client: str | None, since: int | None, until: int | None = None)
     ]
 
 
-def _query_types_id(client: str | None, since: int | None, until: int | None) -> list[dict]:
+def _query_types_id(client: str | list[str] | None, since: int | None, until: int | None) -> list[dict]:
     """Fast path: `type` is a raw column on query_storage, so the view's
     per-row domain/client resolution was pure overhead here — group directly."""
     with _connect() as conn:
-        client_ids = _client_ids_for_ip(conn, client) if client else None
+        client_ids = _client_ids_for_client_filter(conn, client)
         where_sql, params = _id_where(client_ids=client_ids, since=since, until=until)
         rows = conn.execute(
             f"SELECT q.type AS type_code, COUNT(*) AS n FROM query_storage q "
@@ -967,7 +1009,7 @@ def _query_types_id(client: str | None, since: int | None, until: int | None) ->
 
 
 def timeseries(
-    client: str | None,
+    client: str | list[str] | None,
     since: int | None,
     until: int | None,
     buckets: int = 60,
@@ -1045,7 +1087,7 @@ def timeseries(
 
 
 def _timeseries_id(
-    client: str | None, since: int | None, until: int | None, buckets: int
+    client: str | list[str] | None, since: int | None, until: int | None, buckets: int
 ) -> dict:
     """Fast path for timeseries: identical bucketing/series assembly as the
     view-based path, but bucketed/summed directly on query_storage's raw
@@ -1055,7 +1097,7 @@ def _timeseries_id(
     allowed_in = ",".join(str(s) for s in ALLOWED_STATUSES)
 
     with _connect() as conn:
-        client_ids = _client_ids_for_ip(conn, client) if client else None
+        client_ids = _client_ids_for_client_filter(conn, client)
 
         win_until = until if until else int(time.time())
         if since:

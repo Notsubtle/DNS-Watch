@@ -9,6 +9,7 @@ import {
   QueryRow,
   QueryTypeEntry,
   Summary,
+  Tag,
   Timeseries,
   TopEntry,
 } from "./api";
@@ -26,6 +27,7 @@ import AnomaliesPanel from "./components/AnomaliesPanel";
 import AnomalyDetailDrawer from "./components/AnomalyDetailDrawer";
 import RulesModal from "./components/RulesModal";
 import DeviceNamesModal from "./components/DeviceNamesModal";
+import TagsModal from "./components/TagsModal";
 import SettingsModal from "./components/SettingsModal";
 import TabNav, { View } from "./components/TabNav";
 import LiveStreamTab from "./components/LiveStreamTab";
@@ -60,12 +62,14 @@ export default function App() {
   const [view, setView] = useState<View>("dashboard");
   const [filters, setFiltersState] = useState<Filters>({
     client: "",
+    tag: "",
     domain: "",
     status: "all",
     range: "1h",
   });
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [clients, setClients] = useState<ClientInfo[]>([]);
+  const [tags, setTags] = useState<Tag[]>([]);
   const [rows, setRows] = useState<QueryRow[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -83,6 +87,7 @@ export default function App() {
   const [rulesOpen, setRulesOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [deviceNamesOpen, setDeviceNamesOpen] = useState(false);
+  const [tagsOpen, setTagsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const sideColRef = useRef<HTMLDivElement>(null);
   const [sideColHeight, setSideColHeight] = useState<number>();
@@ -125,6 +130,7 @@ export default function App() {
 
   useEffect(() => {
     api.clients().then(setClients).catch(() => {});
+    api.listTags().then(setTags).catch(() => {});
   }, []);
 
   // `showLoading` distinguishes user-initiated fetches (filter/page changes),
@@ -167,7 +173,7 @@ export default function App() {
   // (approximately) when it happened. Reuses the existing filter state
   // machinery — same as ClientList's/TopList's click-through.
   function handleAnomalySelect(a: Anomaly) {
-    setFilters({ ...filters, client: a.ip, range: nearestPresetForAnomaly(a) });
+    setFilters({ ...filters, client: a.ip, tag: "", range: nearestPresetForAnomaly(a) });
   }
 
   // Clicking the IP text specifically opens the side drawer with the raw
@@ -189,6 +195,13 @@ export default function App() {
     }
   }
 
+  // Refresh the tag list (after a create/delete/membership change in the
+  // Manage Tags modal) — FilterBar's dropdown and RulesModal's scope picker
+  // both read from this same state.
+  function reloadTags() {
+    api.listTags().then(setTags).catch(() => {});
+  }
+
   // Re-evaluate alerts on demand (after a rule is added/toggled/removed).
   async function reloadAlerts() {
     try {
@@ -202,13 +215,13 @@ export default function App() {
   useEffect(() => {
     if (view !== "dashboard") return;
     refresh(true);
-  }, [view, filters.client, filters.status, filters.range, debouncedDomain, offset]);
+  }, [view, filters.client, filters.tag, filters.status, filters.range, debouncedDomain, offset]);
 
   useEffect(() => {
     if (!autoRefresh || view !== "dashboard") return;
     const id = setInterval(() => refresh(false), REFRESH_MS);
     return () => clearInterval(id);
-  }, [autoRefresh, view, filters.client, filters.status, filters.range, debouncedDomain, offset]);
+  }, [autoRefresh, view, filters.client, filters.tag, filters.status, filters.range, debouncedDomain, offset]);
 
   // Independent, slower poll for anomalies — see ANOMALIES_REFRESH_MS above
   // for why this isn't part of the main 5s refresh. Also only runs on the
@@ -243,6 +256,9 @@ export default function App() {
           <button className="btn-small" onClick={() => setDeviceNamesOpen(true)}>
             🏷 Name Devices
           </button>
+          <button className="btn-small" onClick={() => setTagsOpen(true)}>
+            🏷 Manage Tags
+          </button>
           <button className="btn-small header-settings" onClick={() => setSettingsOpen(true)}>
             ⚙ Settings
           </button>
@@ -259,6 +275,7 @@ export default function App() {
             filters={filters}
             onChange={setFilters}
             clients={clients}
+            tags={tags}
             autoRefresh={autoRefresh}
             onToggleAutoRefresh={() => setAutoRefresh((v) => !v)}
             csvHref={api.csvUrl(effectiveFilters)}
@@ -313,7 +330,7 @@ export default function App() {
           )}
 
           {rulesOpen && (
-            <RulesModal onClose={() => setRulesOpen(false)} onChange={reloadAlerts} />
+            <RulesModal onClose={() => setRulesOpen(false)} onChange={reloadAlerts} tags={tags} />
           )}
         </>
       )}
@@ -326,6 +343,10 @@ export default function App() {
 
       {deviceNamesOpen && (
         <DeviceNamesModal onClose={() => setDeviceNamesOpen(false)} onChange={reloadClientNames} />
+      )}
+
+      {tagsOpen && (
+        <TagsModal onClose={() => setTagsOpen(false)} onChange={reloadTags} clients={clients} />
       )}
 
       <AnomalyDetailDrawer anomaly={anomalyDetail} onClose={() => setAnomalyDetail(null)} />

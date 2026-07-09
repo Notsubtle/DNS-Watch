@@ -183,6 +183,55 @@ def test_client_filter_aggregate(ftl):
     assert db.count_queries("192.168.1.10", None, None, None, None) == expected
 
 
+def test_tag_scoped_aggregates_match_ground_truth(ftl):
+    """#31: db.py's `client` filter accepts a list of ips (a tag's members),
+    not just a single one, across every function real endpoints call it with.
+    Verified against a raw ground-truth IN-clause query, and cross-checked
+    that the list result equals the sum of the two single-ip results (no
+    double counting, no dropped rows) -- the two ips are deliberately
+    disjoint clients, so their counts must add exactly."""
+    from app import db
+    conn = truth(ftl["path"])
+    ips = ["192.168.1.10", "192.168.1.11"]
+    if ftl["schema"] == "new":
+        q = ("SELECT COUNT(*) n FROM queries q "
+             "LEFT JOIN client c ON c.id=q.client_id WHERE c.ip IN (?,?)")
+    else:
+        q = "SELECT COUNT(*) n FROM queries q WHERE q.client IN (?,?)"
+    expected = conn.execute(q, ips).fetchone()["n"]
+
+    solo_total = sum(db.summary(ip, None, None)["total_queries"] for ip in ips)
+    tagged = db.summary(ips, None, None)
+    assert tagged["total_queries"] == expected == solo_total
+    assert tagged["unique_clients"] == 2
+
+    assert db.count_queries(ips, None, None, None, None) == expected
+
+    # An empty list (a real tag with zero members) must match nothing, not
+    # "no filter" -- the same distinction _build_where/_id_where already draw
+    # between a single unknown ip (matches nothing) and None (no filter).
+    assert db.summary([], None, None)["total_queries"] == 0
+    assert db.count_queries([], None, None, None, None) == 0
+
+
+def test_tag_scoped_top_domains_skips_the_single_client_rollup(ftl):
+    """#31: top_domains()'s "All" range (since=None) is normally served from
+    the rollup cache (a single client's own client_domain_rollup row, or the
+    unfiltered domain_totals) -- neither of which has a per-tag breakdown.
+    A list client must fall through to the direct/id-based scan instead of
+    being (incorrectly) handed to the single-ip rollup reader, and the result
+    must still be correct."""
+    from app import db
+    ips = ["192.168.1.10", "192.168.1.11"]
+    solo_domains: dict[str, int] = {}
+    for ip in ips:
+        for row in db.top_domains(ip, None, 50):
+            solo_domains[row["domain"]] = solo_domains.get(row["domain"], 0) + row["count"]
+
+    tagged = {row["domain"]: row["count"] for row in db.top_domains(ips, None, 50)}
+    assert tagged == solo_domains
+
+
 def test_timeseries_conserves_totals(ftl):
     from app import db
     rows = truth(ftl["path"]).execute("SELECT status FROM queries").fetchall()

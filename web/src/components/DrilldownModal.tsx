@@ -22,9 +22,9 @@ export default function DrilldownModal({ domain, filters, onClose }: Props) {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    // Ignore the client/domain from the ambient filters here — we want this
-    // exact domain across all clients, within the same range.
-    const f: Filters = { client: "", domain, status: "all", range: filters.range };
+    // Ignore the client/tag/domain from the ambient filters here — we want
+    // this exact domain across all clients, within the same range.
+    const f: Filters = { client: "", tag: "", domain, status: "all", range: filters.range };
     api
       .queries(f, 500, 0)
       .then((r) => {

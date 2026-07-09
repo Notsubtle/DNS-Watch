@@ -24,7 +24,7 @@ import threading
 import time
 import urllib.parse
 
-from app import db
+from app import db, tags
 
 STORE_PATH = os.environ.get("DNSWATCH_DB_PATH", "/data/dnswatch.db")
 
@@ -447,6 +447,30 @@ def _emit(pending: list[dict], rule: dict, severity: str, message: str, dedup_ke
     })
 
 
+def _resolve_rule_client(p: dict) -> str | list[str] | None:
+    """Resolves a rule's optional client/tag scoping (#31) into the value
+    db.py's aggregate functions accept. Mirrors main.py's
+    _resolve_client_filter for live API requests; here the tag name comes
+    from the rule's own stored params, not a request query string. A
+    deleted/unknown tag name resolves to "no matching clients" (an empty
+    list) rather than raising -- a scheduled background eval has no request
+    to 400 back to, and "the tag this rule was scoped to no longer exists"
+    should make the rule quietly never fire, not crash the eval loop."""
+    tag = p.get("tag")
+    if tag:
+        return tags.get_tag_ips(tag) or []
+    return p.get("client") or None
+
+
+def _describe_scope(p: dict, client: str | list[str] | None) -> str:
+    """Human-readable "who" for a rule's fired-event message."""
+    if p.get("tag"):
+        return f'tag "{p["tag"]}"'
+    if isinstance(client, str) and client:
+        return client
+    return "all clients"
+
+
 def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
     p = rule["params"]
     if rule["type"] == "volume_threshold":
@@ -462,13 +486,13 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
                           f"(≥ {threshold})",
                           f"vol:{rule['id']}:{c['ip']}")
         else:
-            client = p.get("client") or None
+            client = _resolve_rule_client(p)
             total = db.summary(client, since, None)["total_queries"]
             if total >= threshold:
-                who = client or "all clients"
+                who = _describe_scope(p, client)
                 _emit(pending, rule, "warning",
                       f"{total} queries from {who} in {window_min}m (≥ {threshold})",
-                      f"vol:{rule['id']}:{client or 'any'}")
+                      f"vol:{rule['id']}:{p.get('tag') or p.get('client') or 'any'}")
 
     elif rule["type"] == "new_device":
         window_min = int(p.get("window_minutes", 1440))
@@ -485,10 +509,13 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
         window_min = int(p.get("window_minutes", 60))
         min_count = int(p.get("min_count", 1))
         since = now - window_min * 60
-        count = db.count_queries(None, keyword, None, since, None)
+        client = _resolve_rule_client(p)
+        count = db.count_queries(client, keyword, None, since, None)
         if count >= min_count:
+            who = _describe_scope(p, client)
+            scope_suffix = "" if who == "all clients" else f" from {who}"
             _emit(pending, rule, "warning",
-                  f'{count} queries matching "{keyword}" in {window_min}m (≥ {min_count})',
+                  f'{count} queries matching "{keyword}"{scope_suffix} in {window_min}m (≥ {min_count})',
                   f"kw:{rule['id']}")
 
     elif rule["type"] == "new_vendor":
