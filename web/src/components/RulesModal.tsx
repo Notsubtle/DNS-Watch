@@ -7,6 +7,7 @@ const TYPE_LABELS: Record<RuleType, string> = {
   domain_keyword: "Domain keyword",
   device_quiet: "Device went quiet",
   new_vendor: "Unrecognized/new vendor",
+  digest: "Periodic digest",
 };
 
 function describe(rule: AlertRule): string {
@@ -23,6 +24,9 @@ function describe(rule: AlertRule): string {
   }
   if (rule.type === "device_quiet") {
     return `active client (≥ ${p.min_prior ?? 20} queries) goes silent for ${p.window_minutes ?? 60}m`;
+  }
+  if (rule.type === "digest") {
+    return `${p.period === "weekly" ? "weekly" : "daily"} summary of alerts and new devices`;
   }
   return `≥ ${p.min_count ?? 1} queries matching "${p.keyword ?? ""}" in ${p.window_minutes ?? 60}m`;
 }
@@ -46,6 +50,7 @@ export default function RulesModal({ onClose, onChange }: Props) {
   const [keyword, setKeyword] = useState("");
   const [minCount, setMinCount] = useState(1);
   const [minPrior, setMinPrior] = useState(20);
+  const [digestPeriod, setDigestPeriod] = useState<"daily" | "weekly">("daily");
 
   function load() {
     api.listRules().then(setRules).catch((e) => setError((e as Error).message));
@@ -67,6 +72,9 @@ export default function RulesModal({ onClose, onChange }: Props) {
     }
     if (type === "device_quiet") {
       return { min_prior: minPrior, window_minutes: windowMin };
+    }
+    if (type === "digest") {
+      return { period: digestPeriod };
     }
     return { keyword, min_count: minCount, window_minutes: windowMin };
   }
@@ -208,16 +216,25 @@ export default function RulesModal({ onClose, onChange }: Props) {
               </label>
             )}
 
-            <label>
-              in
-              <input
-                type="number"
-                min={1}
-                value={windowMin}
-                onChange={(e) => setWindowMin(Number(e.target.value))}
-              />
-              min
-            </label>
+            {type === "digest" && (
+              <select value={digestPeriod} onChange={(e) => setDigestPeriod(e.target.value as "daily" | "weekly")}>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+              </select>
+            )}
+
+            {type !== "digest" && (
+              <label>
+                in
+                <input
+                  type="number"
+                  min={1}
+                  value={windowMin}
+                  onChange={(e) => setWindowMin(Number(e.target.value))}
+                />
+                min
+              </label>
+            )}
 
             <button type="submit" className="btn-primary" disabled={busy}>
               Add rule

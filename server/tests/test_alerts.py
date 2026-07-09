@@ -180,6 +180,53 @@ def test_new_vendor_rule_noop_without_vendor_data(client, ftl):
     assert not any(e["type"] == "new_vendor" for e in events)
 
 
+def test_digest_rule_fires_once_per_period_then_on_rollover(ftl, store, monkeypatch):
+    """#30: digest firing is gated on a UTC calendar period, not elapsed-time
+    cooldown -- verify it fires once, stays silent on a repeat eval within the
+    same period, then fires again once the (mocked) clock crosses into the
+    next UTC day. Controls `now` directly (via alerts.time.time) rather than
+    fudging the persisted schedule row, since the period string itself is
+    derived from wall-clock time -- mutating only the stored row wouldn't
+    actually change what period the next eval computes."""
+    from app import alerts
+
+    alerts.create_rule("Digest", "digest", {"period": "daily"})
+    base = int(time.time())
+    monkeypatch.setattr(alerts.time, "time", lambda: base)
+
+    fired1 = alerts.evaluate()
+    assert any(e["type"] == "digest" for e in fired1)
+
+    # Same period, evaluated again -> no new digest event.
+    fired2 = alerts.evaluate()
+    assert not any(e["type"] == "digest" for e in fired2)
+
+    # Cross a UTC day boundary -> a new period, so the digest fires again.
+    monkeypatch.setattr(alerts.time, "time", lambda: base + 86400 + 5)
+    fired3 = alerts.evaluate()
+    assert any(e["type"] == "digest" for e in fired3)
+
+    # And immediately re-evaluating the new period is quiet again.
+    fired4 = alerts.evaluate()
+    assert not any(e["type"] == "digest" for e in fired4)
+
+
+def test_digest_message_mentions_period_and_summarizes_activity(client, store):
+    """Digest content should be honest about what it's summarizing (events +
+    new devices since the last digest), not a generic placeholder."""
+    client.post("/api/alert-rules", json={
+        "name": "New", "type": "new_device", "params": {"window_minutes": 600}})
+    client.post("/api/alert-rules", json={
+        "name": "Digest", "type": "digest", "params": {"period": "weekly"}})
+
+    result = client.get("/api/alerts").json()
+    digest_events = [e for e in result["events"] if e["type"] == "digest"]
+    assert digest_events, "digest rule should have fired"
+    msg = digest_events[0]["message"].lower()
+    assert "weekly digest" in msg
+    assert "device" in msg or "alert" in msg
+
+
 def test_settings_roundtrip_and_format_validation(client):
     assert client.get("/api/settings").json()["webhook_enabled"] is False
     updated = client.patch("/api/settings", json={
