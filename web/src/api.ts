@@ -108,7 +108,9 @@ export type RuleType =
   | "new_device"
   | "domain_keyword"
   | "device_quiet"
-  | "new_vendor";
+  | "new_vendor"
+  | "doh_provider"
+  | "digest";
 
 export interface AlertRule {
   id: number;

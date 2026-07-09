@@ -23,6 +23,7 @@ import ssl
 import threading
 import time
 import urllib.parse
+from datetime import datetime, timezone
 
 from app import db, tags
 
@@ -33,7 +34,10 @@ STORE_PATH = os.environ.get("DNSWATCH_DB_PATH", "/data/dnswatch.db")
 # the same event.
 _eval_lock = threading.Lock()
 
-VALID_TYPES = {"volume_threshold", "new_device", "domain_keyword", "device_quiet", "new_vendor"}
+VALID_TYPES = {
+    "volume_threshold", "new_device", "domain_keyword", "device_quiet",
+    "new_vendor", "doh_provider", "digest",
+}
 
 # Webhook payload shapes. "generic" is DNS Watch's own JSON; "slack"/"discord"
 # emit exactly the single field each of those incoming-webhook APIs requires.
@@ -50,6 +54,10 @@ DEFAULT_COOLDOWN = {
     "domain_keyword": 900,
     "device_quiet": 3600,
     "new_vendor": 86400,
+    "doh_provider": 86400,
+    # No entry for "digest": its firing is gated on a calendar-period
+    # boundary (see digest_schedule / _dedup_exists below), not an
+    # elapsed-time cooldown, since that's the whole point of a digest.
 }
 
 
@@ -90,6 +98,11 @@ def init_store() -> None:
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS digest_schedule (
+                rule_id INTEGER PRIMARY KEY,
+                last_sent_period TEXT NOT NULL,
+                last_sent_at INTEGER NOT NULL
             );
             """
         )
@@ -436,7 +449,25 @@ def _recently_fired(conn: sqlite3.Connection, dedup_key: str, cooldown: int, now
     return bool(row) and (now - row["created_at"]) < cooldown
 
 
-def _emit(pending: list[dict], rule: dict, severity: str, message: str, dedup_key: str) -> None:
+def _dedup_exists(conn: sqlite3.Connection, dedup_key: str) -> bool:
+    """True if `dedup_key` was EVER recorded before, regardless of age.
+
+    Used instead of `_recently_fired`'s elapsed-time check for rule types
+    (currently only "digest") whose dedup_key already encodes the exact
+    scope that must never repeat -- e.g. "digest:<rule_id>:<period>" for a
+    specific calendar period. A time-based cooldown is the wrong guard for
+    that: it would either (a) be short enough to let two concurrent
+    evaluate() calls both slip through before the first's digest_schedule
+    update commits, or (b) be so long it re-implements a second, redundant
+    period-tracking mechanism. Existence is exactly the right check: once a
+    period's event exists, it must never be inserted again, no matter when.
+    """
+    return conn.execute(
+        "SELECT 1 FROM alert_events WHERE dedup_key = ? LIMIT 1", (dedup_key,)
+    ).fetchone() is not None
+
+
+def _emit(pending: list[dict], rule: dict, severity: str, message: str, dedup_key: str, **extra) -> None:
     pending.append({
         "rule_id": rule["id"],
         "rule_name": rule["name"],
@@ -444,6 +475,7 @@ def _emit(pending: list[dict], rule: dict, severity: str, message: str, dedup_ke
         "severity": severity,
         "message": message,
         "dedup_key": dedup_key,
+        **extra,
     })
 
 
@@ -469,6 +501,53 @@ def _describe_scope(p: dict, client: str | list[str] | None) -> str:
     if isinstance(client, str) and client:
         return client
     return "all clients"
+
+
+# --------------------------------------------------------------------------
+# Digest scheduling
+#
+# Cooldown (elapsed-seconds-since-last-fire) is the wrong primitive for "once
+# a day"/"once a week": it drifts with whenever the eval tick happens to land
+# and has no notion of a calendar boundary. Instead we track the last UTC
+# calendar period a digest was actually SENT for ("2026-07-09" for daily,
+# "2026-W28" -- ISO year-week -- for weekly) per rule, in `digest_schedule`.
+# The record is updated in the exact same commit as the alert_events insert
+# (see evaluate()), under the same `_eval_lock` that already prevents every
+# other rule type from double-firing under concurrent callers, so a crash
+# between "decided to fire" and "recorded" can't double-send a digest either.
+# --------------------------------------------------------------------------
+
+def _digest_period(freq: str, now: int) -> str:
+    dt = datetime.fromtimestamp(now, tz=timezone.utc)
+    if freq == "weekly":
+        iso_year, iso_week, _ = dt.isocalendar()
+        return f"{iso_year}-W{iso_week:02d}"
+    return dt.strftime("%Y-%m-%d")  # daily (also the fallback for unknown values)
+
+
+def _get_digest_schedule(conn: sqlite3.Connection, rule_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT last_sent_period, last_sent_at FROM digest_schedule WHERE rule_id = ?",
+        (rule_id,),
+    ).fetchone()
+
+
+def _events_since(conn: sqlite3.Connection, since: int) -> list[dict]:
+    """Fired events after `since`, excluding other digests (a digest summarizes
+    what happened, not previous digests about what happened)."""
+    rows = conn.execute(
+        "SELECT * FROM alert_events WHERE created_at > ? AND type != 'digest' "
+        "ORDER BY created_at DESC",
+        (since,),
+    ).fetchall()
+    return [
+        {
+            "id": r["id"], "rule_id": r["rule_id"], "rule_name": r["rule_name"],
+            "type": r["type"], "severity": r["severity"], "message": r["message"],
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]
 
 
 def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
@@ -528,6 +607,21 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
                 message = f"New vendor on the network: {c['vendor']} — {c['name']} ({c['ip']})"
             _emit(pending, rule, "info", message, f"vendor:{rule['id']}:{c['ip']}")
 
+    elif rule["type"] == "doh_provider":
+        # See db.DOH_PROVIDER_DOMAINS's module note: this detects a client
+        # querying a known DoH/DoT provider's OWN domain (setup/fallback
+        # lookups Pi-hole can still see), NOT actual DoH/VPN bypass traffic
+        # -- that traffic, by definition, never reaches Pi-hole at all.
+        window_min = int(p.get("window_minutes", 60))
+        since = now - window_min * 60
+        for hit in db.doh_provider_hits(since):
+            _emit(pending, rule, "warning",
+                  f"{hit['name']} ({hit['ip']}) queried known DoH/DoT provider domain "
+                  f"{hit['provider']} ({hit['count']}x in {window_min}m) — this device may be "
+                  f"setting up or falling back to a DNS resolver that bypasses Pi-hole, "
+                  f"not confirmation that it has",
+                  f"doh:{rule['id']}:{hit['ip']}:{hit['provider']}")
+
     elif rule["type"] == "device_quiet":
         # Fire when a client that was active in the *prior* window has gone
         # silent in the *recent* one — device unplugged, offline, or blocked.
@@ -545,6 +639,32 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
                       f"{c['name']} went quiet — {c['count']} queries in the prior "
                       f"{window_min}m, none since ({note})",
                       f"quiet:{rule['id']}:{c['ip']}")
+
+    elif rule["type"] == "digest":
+        # Periodic "here's what changed" summary, not a condition trip -- see
+        # the digest scheduling block above for why this is gated on a
+        # calendar period rather than the cooldown every other rule type uses.
+        freq = p.get("period", "daily")
+        if freq not in ("daily", "weekly"):
+            freq = "daily"
+        period = _digest_period(freq, now)
+        with _connect() as conn:
+            sched = _get_digest_schedule(conn, rule["id"])
+            if sched and sched["last_sent_period"] == period:
+                return  # already sent this period; nothing to do
+            since = sched["last_sent_at"] if sched else now - (86400 if freq == "daily" else 7 * 86400)
+            events = _events_since(conn, since)
+        new_devices = db.new_clients(since)
+        parts = []
+        if events:
+            parts.append(f"{len(events)} alert(s) fired")
+        if new_devices:
+            names = ", ".join(c["name"] for c in new_devices[:10])
+            parts.append(f"{len(new_devices)} new device(s): {names}")
+        summary = "; ".join(parts) if parts else "no alerts or new devices"
+        message = f"{freq.capitalize()} digest — {summary} since the last digest"
+        _emit(pending, rule, "info", message, f"digest:{rule['id']}:{period}",
+              digest_period=period)
 
 
 def evaluate() -> list[dict]:
@@ -567,15 +687,29 @@ def evaluate() -> list[dict]:
     fired: list[dict] = []
     with _eval_lock, _connect() as conn:
         for ev in pending:
-            cooldown = DEFAULT_COOLDOWN.get(ev["type"], 900)
-            if _recently_fired(conn, ev["dedup_key"], cooldown, now):
-                continue
+            if ev["type"] == "digest":
+                if _dedup_exists(conn, ev["dedup_key"]):
+                    continue
+            else:
+                cooldown = DEFAULT_COOLDOWN.get(ev["type"], 900)
+                if _recently_fired(conn, ev["dedup_key"], cooldown, now):
+                    continue
             conn.execute(
                 "INSERT INTO alert_events (rule_id, rule_name, type, severity, message, dedup_key, created_at) "
                 "VALUES (?,?,?,?,?,?,?)",
                 (ev["rule_id"], ev["rule_name"], ev["type"], ev["severity"],
                  ev["message"], ev["dedup_key"], now),
             )
+            if ev["type"] == "digest":
+                # Same commit as the event insert above -- a crash between
+                # "decided to fire" and "recorded" can't double-send, since
+                # either both of these land or neither does.
+                conn.execute(
+                    "INSERT INTO digest_schedule (rule_id, last_sent_period, last_sent_at) "
+                    "VALUES (?,?,?) ON CONFLICT(rule_id) DO UPDATE SET "
+                    "last_sent_period = excluded.last_sent_period, last_sent_at = excluded.last_sent_at",
+                    (ev["rule_id"], ev["digest_period"], now),
+                )
             fired.append({**ev, "created_at": now})
         conn.commit()
 
