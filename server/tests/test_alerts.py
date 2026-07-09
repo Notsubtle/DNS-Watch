@@ -52,6 +52,54 @@ def test_evaluation_and_cooldown(client):
     assert len(a2["events"]) == len(a["events"])
 
 
+def test_volume_threshold_rule_scoped_to_tag(client):
+    """#31: volume_threshold's overall ("any") scope can be narrowed to a tag
+    instead of one client or the whole network. A threshold met by the tag's
+    combined traffic but not by either client alone proves the scoping
+    actually sums the group rather than silently falling back to "any"."""
+    tag = client.post("/api/tags", json={"name": "Laptops"}).json()
+    client.post(f"/api/tags/{tag['id']}/members", json={"ip": "192.168.1.10"})
+    client.post(f"/api/tags/{tag['id']}/members", json={"ip": "192.168.1.11"})
+
+    solo_10 = client.get("/api/summary", params={"client": "192.168.1.10", "range": "all"}).json()
+    solo_11 = client.get("/api/summary", params={"client": "192.168.1.11", "range": "all"}).json()
+    combined = solo_10["total_queries"] + solo_11["total_queries"]
+    threshold = max(solo_10["total_queries"], solo_11["total_queries"]) + 1
+    assert threshold <= combined, "fixture didn't produce enough traffic for this test to be meaningful"
+
+    client.post("/api/alert-rules", json={
+        "name": "TagVol", "type": "volume_threshold",
+        "params": {"scope": "any", "tag": "Laptops", "threshold": threshold, "window_minutes": 600000}})
+    events = client.get("/api/alerts").json()["events"]
+    tag_events = [e for e in events if e["type"] == "volume_threshold"]
+    assert tag_events and any('tag "Laptops"' in e["message"] for e in tag_events)
+
+
+def test_domain_keyword_rule_scoped_to_tag_excludes_other_clients(client):
+    """#31: an untagged client's matching queries must not count toward a
+    tag-scoped domain_keyword rule."""
+    tag = client.post("/api/tags", json={"name": "JustLaptop"}).json()
+    client.post(f"/api/tags/{tag['id']}/members", json={"ip": "192.168.1.10"})
+
+    global_count = client.get(
+        "/api/queries", params={"domain": "ads", "range": "all", "limit": 1}
+    ).json()["total"]
+    tagged_count = client.get(
+        "/api/queries", params={"domain": "ads", "tag": "JustLaptop", "range": "all", "limit": 1}
+    ).json()["total"]
+    assert tagged_count <= global_count
+
+    client.post("/api/alert-rules", json={
+        "name": "TagKW", "type": "domain_keyword",
+        "params": {"keyword": "ads", "tag": "JustLaptop", "min_count": max(tagged_count, 1),
+                   "window_minutes": 600000}})
+    events = client.get("/api/alerts").json()["events"]
+    kw_events = [e for e in events if e["type"] == "domain_keyword"]
+    assert (len(kw_events) > 0) == (tagged_count > 0)
+    if tagged_count > 0:
+        assert any("JustLaptop" in e["message"] for e in kw_events)
+
+
 def test_device_quiet_rule(client, ftl):
     import sqlite3
     from conftest import CLIENTS

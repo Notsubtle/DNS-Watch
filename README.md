@@ -183,9 +183,11 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   status (allowed/blocked), and timestamp. Scrolls internally within a fixed-height
   panel (newest first) instead of growing the page.
 - **Filters** — by client (dropdown of known devices, searchable by vendor — e.g.
-  type "Espressif" to narrow the list to just those devices), domain (substring
-  search), status (allowed / blocked / all), and time range (15m / 1h / 24h / 7d /
-  custom).
+  type "Espressif" to narrow the list to just those devices) **or by tag**
+  (a user-defined group like "kids"/"IoT"/"guest" — see **🏷 Manage Tags** in the
+  header — scoping every dashboard panel to that whole group at once instead of
+  one device or every device), domain (substring search), status
+  (allowed / blocked / all), and time range (15m / 1h / 24h / 7d / custom).
 - **Summary cards** — total queries, blocked %, unique clients, unique domains for
   the current filter/time window.
 - **Top domains / top clients** — ranked lists for the current filter window.
@@ -198,13 +200,14 @@ The app is organised into tabs: a **Dashboard** (everything below down to
 - **Query-type breakdown** — A / AAAA / HTTPS / PTR / … distribution.
 - **CSV export** — download the current filtered query view.
 - **Pagination** — the query log is paged with an exact total ("201–400 of 5,000").
-- **Alert rules** — watch for query-volume spikes (per-client or overall), new
-  devices, an **unrecognized or new vendor** joining (complementary to "new
-  devices": this one is keyed on the device's manufacturer rather than its raw
-  IP — fires when a device's vendor can't be identified at all, or when it's the
-  network's first-ever device from a vendor it does recognize), specific domain
-  keywords, or a **device going quiet** (an active client that suddenly stops
-  querying — offline/unplugged/blocked). Rules are evaluated
+- **Alert rules** — watch for query-volume spikes (per-client, per-**tag**, or
+  overall), new devices, an **unrecognized or new vendor** joining (complementary
+  to "new devices": this one is keyed on the device's manufacturer rather than
+  its raw IP — fires when a device's vendor can't be identified at all, or when
+  it's the network's first-ever device from a vendor it does recognize),
+  specific domain keywords (optionally scoped to a tag too), or a **device going
+  quiet** (an active client that suddenly stops querying — offline/unplugged/
+  blocked). Rules are evaluated
   **server-side on a timer** (`ALERT_EVAL_INTERVAL_SECONDS`, default 60), so alerts fire and webhooks
   send even with no dashboard open. Fired alerts show in the Alerts panel.
   Rules and events are stored in DNS Watch's **own** writable SQLite database
@@ -269,6 +272,14 @@ The app is organised into tabs: a **Dashboard** (everything below down to
      considered and left out: this container's default bridge network can't see
      LAN multicast traffic (a real networking trade-off, not a code gap — see
      `server/app/resolve.py`).
+- **Client tags/groups** — click **🏷 Manage Tags** in the header to label a set of
+  devices under a name (e.g. "kids", "IoT", "guest"). Once a tag has members, it
+  shows up alongside individual devices in the dashboard's client/tag filter
+  (scoping every panel — summary, top domains, the query log, CSV export — to the
+  whole group at once) and as a scope option on **volume threshold** and **domain
+  keyword** alert rules, so one rule can watch "all the IoT stuff" instead of being
+  duplicated per device. A tag is a group membership, independent of a device's
+  manual name — a device can carry a name, a tag, both, or neither.
 - **Vendor identification** — the client detail view shows a device's manufacturer
   when it can be determined: first from Pi-hole's own MAC-vendor lookup, and, when
   that's empty, from a bundled offline IEEE OUI table (regenerated via
