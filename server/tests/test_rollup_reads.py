@@ -240,6 +240,66 @@ def test_read_query_types_matches_direct_idstore(idb, rstore):
     assert [r["count"] for r in got] == [r["count"] for r in exp]
 
 
+def test_new_domains_matches_ground_truth(idb, rstore):
+    """#32: rollups.new_domains() is a persisted first-seen-per-domain table
+    maintained incrementally (see the module note on _Deltas.domain_first_seen/
+    _apply), not a live scan -- verified against a raw MIN(timestamp) GROUP BY
+    domain query over the real query_storage rows."""
+    _build_idstore_with_traps(idb, _NOW - 5 * 86400, _NOW)
+    rollups.refresh_rollups()
+
+    conn = sqlite3.connect(idb)
+    conn.row_factory = sqlite3.Row
+    truth = {
+        r["domain"]: r["fs"]
+        for r in conn.execute(
+            "SELECT d.domain AS domain, MIN(q.timestamp) AS fs "
+            "FROM query_storage q JOIN domain_by_id d ON d.id = q.domain "
+            "GROUP BY d.domain"
+        )
+    }
+
+    # A cutoff strictly before the earliest of anything -> every domain is "new".
+    all_new = {r["domain"]: r["first_seen"] for r in rollups.new_domains(0)}
+    assert all_new == {d: int(ts) for d, ts in truth.items()}
+
+    # A cutoff after everything -> nothing is new.
+    assert rollups.new_domains(_NOW + 1) == []
+
+    # A cutoff in the middle -> exactly the domains first seen at/after it.
+    cutoff = _NOW - 2 * 86400
+    expected_mid = {d for d, ts in truth.items() if ts >= cutoff}
+    got_mid = {r["domain"] for r in rollups.new_domains(cutoff)}
+    assert got_mid == expected_mid
+
+
+def test_new_domains_reflects_a_genuinely_new_domain_after_refresh(idb, rstore):
+    """A domain inserted AFTER the initial backfill, then picked up by a
+    second refresh_rollups() call, must show up as first-seen at its own
+    (later) timestamp -- not silently missing, and not misdated to the
+    original dataset's time range."""
+    _build_idstore_with_traps(idb, _NOW - 5 * 86400, _NOW)
+    rollups.refresh_rollups()
+    before = {r["domain"] for r in rollups.new_domains(0)}
+    assert "brand-new.example" not in before
+
+    conn = sqlite3.connect(idb)
+    c = conn.cursor()
+    did = _idstore_domain_id(c, "brand-new.example")
+    cid = _idstore_client_id(c, "192.168.0.10", "laptop")
+    later = _NOW + 1000
+    c.execute(
+        "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+        (later, 1, 2, did, cid),
+    )
+    conn.commit()
+    conn.close()
+
+    rollups.refresh_rollups()
+    after = {r["domain"]: r["first_seen"] for r in rollups.new_domains(0)}
+    assert after["brand-new.example"] == later
+
+
 # --------------------------------------------------------------------------
 # Cross-schema agreement: read_* == the direct scan on every schema shape.
 #
@@ -358,6 +418,7 @@ def test_unbackfilled_rollup_falls_through(idb, rstore):
     assert rollups.read_top_domains(_DUP_IP, 15) is None
     assert rollups.read_top_clients(15) is None
     assert rollups.read_query_types() is None
+    assert rollups.new_domains(0) is None  # #32 -- see its own docstring on why
 
     # So db.py serves the correct direct result for the All range, never zeros.
     assert db.summary(None, None, None) == db._summary_id(None, None, None)
