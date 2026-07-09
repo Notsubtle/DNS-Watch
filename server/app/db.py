@@ -636,10 +636,47 @@ def count_queries(
 
     Lets the frontend show "showing 200 of 5,000" and build pager controls.
     """
+    if detect_schema().has_id_storage:
+        return _count_queries_id(client, domain, status, since, until)
     _, join = _client_join_sql()
     where_sql, params = _build_where(client, domain, status, since, until)
     sql = f"SELECT COUNT(*) AS n FROM queries q {join} WHERE {where_sql}"
     with _connect() as conn:
+        return conn.execute(sql, params).fetchone()["n"]
+
+
+def _count_queries_id(
+    client: str | None,
+    domain: str | None,
+    status: str | None,
+    since: int | None,
+    until: int | None,
+) -> int:
+    """count_queries fast path for the normalized (has_id_storage) schema (#9).
+
+    A plain COUNT(*) against the `queries` view was paying the view's per-row
+    CORRELATED SCALAR SUBQUERY that resolves the client id to a name -- work
+    whose result a count never uses. Counting query_storage directly instead
+    lets a bounded, unfiltered range resolve entirely from the timestamp index
+    (SEARCH ... USING COVERING INDEX idx_queries_timestamp, verified with
+    EXPLAIN QUERY PLAN against the real UAT snapshot: ~37ms vs. ~320ms for a
+    684k-row 7-day window -- no row materialization at all).
+
+    Domain filtering resolves matching ids from domain_by_id once (a small,
+    distinct-domains table) rather than resolving id->text per query_storage
+    row. Like the existing client-id filter in _id_where, this only matches
+    rows stored as an integer id (every row in the current schema data is),
+    not the view's fallback for a literal-text domain/client value -- the
+    same simplification every other id-based aggregate in this module already
+    makes.
+    """
+    with _connect() as conn:
+        client_ids = _client_ids_for_ip(conn, client) if client else None
+        where_sql, params = _id_where(client_ids, since, until, status)
+        if domain:
+            where_sql += " AND q.domain IN (SELECT id FROM domain_by_id WHERE domain LIKE ?)"
+            params.append(f"%{domain[:253]}%")
+        sql = f"SELECT COUNT(*) AS n FROM query_storage q WHERE {where_sql}"
         return conn.execute(sql, params).fetchone()["n"]
 
 
