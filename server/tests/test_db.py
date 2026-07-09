@@ -83,6 +83,29 @@ def test_count_matches_list_under_filters(ftl):
     assert db.count_queries(None, "ads", None, None, None) == len(dl)
 
 
+def test_count_queries_uses_id_fast_path_on_normalized_schema(ftl, monkeypatch):
+    """#9: count_queries() must route the normalized (has_id_storage) schema
+    through the query_storage fast path, not the `queries` view -- a plain
+    COUNT(*) against the view pays a per-row correlated subquery to resolve
+    the client id to a name, work a count never uses (profiled at ~10x slower
+    against the real UAT snapshot). This pins the routing decision so a future
+    refactor can't silently reintroduce the view path for this schema."""
+    from app import db
+    calls = []
+    orig = db._count_queries_id
+
+    def spy(*args):
+        calls.append(args)
+        return orig(*args)
+
+    monkeypatch.setattr(db, "_count_queries_id", spy)
+    db.count_queries(None, None, None, None, None)
+    if ftl["schema"] == "idstore":
+        assert calls, "expected count_queries to use the query_storage fast path"
+    else:
+        assert not calls
+
+
 def test_client_filter_aggregate(ftl):
     from app import db
     conn = truth(ftl["path"])
