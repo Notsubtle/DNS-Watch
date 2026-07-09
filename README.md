@@ -33,11 +33,13 @@ go looking:
   most, and to which trackers.
 - **Parents / households** — watch what a specific device is doing, or get alerted
   when it hits domains you care about.
-- **Security hobbyists** — get flagged when a **new/unknown device** joins, when a
-  device's query volume **spikes** (possible malware or DNS exfiltration), or when a
-  normally-active device **goes quiet** (offline or tampered with). Spikes and silences
-  are also surfaced **automatically** in a **Network Anomalies** panel, measured against
-  each device's *own* 7-day baseline — no rule setup required.
+- **Security hobbyists** — get flagged when a **new/unknown device** joins (including
+  by **vendor**: a device whose manufacturer can't be identified at all, or the first
+  device on your network from a brand you've never seen before), when a device's query
+  volume **spikes** (possible malware or DNS exfiltration), or when a normally-active
+  device **goes quiet** (offline or tampered with). Spikes and silences are also
+  surfaced **automatically** in a **Network Anomalies** panel, measured against each
+  device's *own* 7-day baseline — no rule setup required.
 - **Tinkerers** — a filterable, per-client live log for debugging a chatty device or
   a false-positive block.
 - **Investigators** — when something looks off, dedicated tools to dig in: a live
@@ -180,8 +182,10 @@ The app is organised into tabs: a **Dashboard** (everything below down to
 - **Live query table** — every DNS query, auto-refreshing, with client, domain,
   status (allowed/blocked), and timestamp. Scrolls internally within a fixed-height
   panel (newest first) instead of growing the page.
-- **Filters** — by client (dropdown of known devices), domain (substring search),
-  status (allowed / blocked / all), and time range (15m / 1h / 24h / 7d / custom).
+- **Filters** — by client (dropdown of known devices, searchable by vendor — e.g.
+  type "Espressif" to narrow the list to just those devices), domain (substring
+  search), status (allowed / blocked / all), and time range (15m / 1h / 24h / 7d /
+  custom).
 - **Summary cards** — total queries, blocked %, unique clients, unique domains for
   the current filter/time window.
 - **Top domains / top clients** — ranked lists for the current filter window.
@@ -195,8 +199,12 @@ The app is organised into tabs: a **Dashboard** (everything below down to
 - **CSV export** — download the current filtered query view.
 - **Pagination** — the query log is paged with an exact total ("201–400 of 5,000").
 - **Alert rules** — watch for query-volume spikes (per-client or overall), new
-  devices, specific domain keywords, or a **device going quiet** (an active client
-  that suddenly stops querying — offline/unplugged/blocked). Rules are evaluated
+  devices, an **unrecognized or new vendor** joining (complementary to "new
+  devices": this one is keyed on the device's manufacturer rather than its raw
+  IP — fires when a device's vendor can't be identified at all, or when it's the
+  network's first-ever device from a vendor it does recognize), specific domain
+  keywords, or a **device going quiet** (an active client that suddenly stops
+  querying — offline/unplugged/blocked). Rules are evaluated
   **server-side on a timer** (`ALERT_EVAL_INTERVAL_SECONDS`, default 60), so alerts fire and webhooks
   send even with no dashboard open. Fired alerts show in the Alerts panel.
   Rules and events are stored in DNS Watch's **own** writable SQLite database
