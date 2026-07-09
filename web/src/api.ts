@@ -26,6 +26,12 @@ export interface ClientInfo {
   ip: string;
   name: string;
   query_count: number;
+  // Vendor enrichment (#4/#5) — see DeviceNameRow for field semantics. Lets
+  // the client picker be searched/filtered by vendor (#11).
+  hwaddr: string | null;
+  mac_known: boolean;
+  vendor: string | null;
+  vendor_unknown_reason: "randomized" | "unlisted" | null;
 }
 
 export interface Summary {
