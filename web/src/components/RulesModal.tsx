@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertRule, api, RuleType } from "../api";
+import { AlertRule, api, RuleType, Tag } from "../api";
 
 const TYPE_LABELS: Record<RuleType, string> = {
   volume_threshold: "Query volume",
@@ -15,7 +15,10 @@ const TYPE_LABELS: Record<RuleType, string> = {
 function describe(rule: AlertRule): string {
   const p = rule.params as Record<string, number | string>;
   if (rule.type === "volume_threshold") {
-    const who = p.scope === "per_client" ? "any client" : (p.client as string) || "all clients";
+    const who =
+      p.scope === "per_client"
+        ? "any client"
+        : (p.tag && `tag "${p.tag}"`) || (p.client as string) || "all clients";
     return `≥ ${p.threshold ?? 1000} queries from ${who} in ${p.window_minutes ?? 5}m`;
   }
   if (rule.type === "new_device") {
@@ -36,15 +39,17 @@ function describe(rule: AlertRule): string {
   if (rule.type === "digest") {
     return `${p.period === "weekly" ? "weekly" : "daily"} summary of alerts and new devices`;
   }
-  return `≥ ${p.min_count ?? 1} queries matching "${p.keyword ?? ""}" in ${p.window_minutes ?? 60}m`;
+  const kwWho = p.tag ? ` from tag "${p.tag}"` : "";
+  return `≥ ${p.min_count ?? 1} queries matching "${p.keyword ?? ""}"${kwWho} in ${p.window_minutes ?? 60}m`;
 }
 
 interface Props {
   onClose: () => void;
   onChange: () => void; // ask App to re-evaluate alerts after a rule change
+  tags: Tag[];
 }
 
-export default function RulesModal({ onClose, onChange }: Props) {
+export default function RulesModal({ onClose, onChange, tags }: Props) {
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -58,6 +63,10 @@ export default function RulesModal({ onClose, onChange }: Props) {
   const [keyword, setKeyword] = useState("");
   const [minCount, setMinCount] = useState(1);
   const [minPrior, setMinPrior] = useState(20);
+  // Optional tag scope (#31) for volume_threshold's "any" scope and
+  // domain_keyword -- "" means unscoped (all clients), matching prior
+  // behavior for anyone who never touches this field.
+  const [tagScope, setTagScope] = useState("");
   const [digestPeriod, setDigestPeriod] = useState<"daily" | "weekly">("daily");
 
   function load() {
@@ -73,7 +82,8 @@ export default function RulesModal({ onClose, onChange }: Props) {
 
   function buildParams(): Record<string, unknown> {
     if (type === "volume_threshold") {
-      return { scope, threshold, window_minutes: windowMin };
+      const tagParam = scope === "any" && tagScope ? { tag: tagScope } : {};
+      return { scope, threshold, window_minutes: windowMin, ...tagParam };
     }
     if (
       type === "new_device" ||
@@ -89,7 +99,8 @@ export default function RulesModal({ onClose, onChange }: Props) {
     if (type === "digest") {
       return { period: digestPeriod };
     }
-    return { keyword, min_count: minCount, window_minutes: windowMin };
+    const tagParam = tagScope ? { tag: tagScope } : {};
+    return { keyword, min_count: minCount, window_minutes: windowMin, ...tagParam };
   }
 
   async function add(e: React.FormEvent) {
@@ -182,6 +193,20 @@ export default function RulesModal({ onClose, onChange }: Props) {
                   <option value="per_client">Per client</option>
                   <option value="any">All clients</option>
                 </select>
+                {scope === "any" && tags.length > 0 && (
+                  <select
+                    value={tagScope}
+                    onChange={(e) => setTagScope(e.target.value)}
+                    title="Optionally scope to a tag instead of every client"
+                  >
+                    <option value="">(no tag — every client)</option>
+                    {tags.map((t) => (
+                      <option key={t.name} value={t.name}>
+                        🏷 {t.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 <label>
                   ≥
                   <input
@@ -203,6 +228,20 @@ export default function RulesModal({ onClose, onChange }: Props) {
                   value={keyword}
                   onChange={(e) => setKeyword(e.target.value)}
                 />
+                {tags.length > 0 && (
+                  <select
+                    value={tagScope}
+                    onChange={(e) => setTagScope(e.target.value)}
+                    title="Optionally scope to a tag instead of every client"
+                  >
+                    <option value="">(no tag — every client)</option>
+                    {tags.map((t) => (
+                      <option key={t.name} value={t.name}>
+                        🏷 {t.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 <label>
                   ≥
                   <input

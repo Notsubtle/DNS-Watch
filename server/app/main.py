@@ -18,7 +18,7 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import alerts, db, names, resolve, rollups
+from app import alerts, db, names, resolve, rollups, tags
 
 # How often the server evaluates alert rules on its own, independent of any open
 # dashboard. This is what makes alerting/webhooks work headless. Set to 0 to
@@ -179,6 +179,20 @@ async def csrf_guard(request, call_next):
     return await call_next(request)
 
 
+def _resolve_client_filter(client: str | None, tag: str | None) -> str | list[str] | None:
+    """Resolves the dashboard's mutually-exclusive `client`/`tag` query params
+    (#31) into the single value db.py's aggregate functions accept -- a plain
+    ip, a tag's member-ip list, or None for no filter. `tag` wins if somehow
+    both are given (the UI only ever sends one). An unknown tag name 404s
+    rather than silently matching everything or nothing."""
+    if tag:
+        ips = tags.get_tag_ips(tag)
+        if ips is None:
+            raise HTTPException(status_code=404, detail=f"no such tag: {tag!r}")
+        return ips
+    return client
+
+
 def _since_from_range(range_param: str | None, since_param: int | None) -> int | None:
     """Accepts either an explicit unix `since` or a relative `range` like '1h','24h','7d','15m'."""
     if since_param:
@@ -209,6 +223,7 @@ def api_clients():
 @app.get("/api/queries")
 def api_queries(
     client: str | None = None,
+    tag: str | None = None,
     domain: str | None = None,
     status: str | None = None,
     range: str | None = "1h",
@@ -217,9 +232,10 @@ def api_queries(
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
+    who = _resolve_client_filter(client, tag)
     effective_since = _since_from_range(range, since)
-    rows = db.list_queries(client, domain, status, effective_since, until, limit, offset)
-    total = db.count_queries(client, domain, status, effective_since, until)
+    rows = db.list_queries(who, domain, status, effective_since, until, limit, offset)
+    total = db.count_queries(who, domain, status, effective_since, until)
     return {"total": total, "limit": limit, "offset": offset, "rows": rows}
 
 
@@ -260,6 +276,7 @@ def api_simulate_blocklist(body: SimulateRequest):
 @app.get("/api/queries.csv")
 def api_queries_csv(
     client: str | None = None,
+    tag: str | None = None,
     domain: str | None = None,
     status: str | None = None,
     range: str | None = "1h",
@@ -269,8 +286,9 @@ def api_queries_csv(
 ):
     """Export the current query view as CSV. Higher default cap than the paged
     JSON endpoint since an export is expected to be the whole matching set."""
+    who = _resolve_client_filter(client, tag)
     effective_since = _since_from_range(range, since)
-    rows = db.list_queries(client, domain, status, effective_since, until, limit, 0)
+    rows = db.list_queries(who, domain, status, effective_since, until, limit, 0)
 
     def generate():
         buf = io.StringIO()
@@ -296,21 +314,27 @@ def api_queries_csv(
 
 
 @app.get("/api/query-types")
-def api_query_types(client: str | None = None, range: str | None = "1h", since: int | None = None):
+def api_query_types(
+    client: str | None = None, tag: str | None = None,
+    range: str | None = "1h", since: int | None = None,
+):
+    who = _resolve_client_filter(client, tag)
     effective_since = _since_from_range(range, since)
-    return db.query_types(client, effective_since)
+    return db.query_types(who, effective_since)
 
 
 @app.get("/api/timeseries")
 def api_timeseries(
     client: str | None = None,
+    tag: str | None = None,
     range: str | None = "1h",
     since: int | None = None,
     until: int | None = None,
     buckets: int = Query(60, ge=1, le=500),
 ):
+    who = _resolve_client_filter(client, tag)
     effective_since = _since_from_range(range, since)
-    return db.timeseries(client, effective_since, until, buckets)
+    return db.timeseries(who, effective_since, until, buckets)
 
 
 @app.get("/api/client/{ip}")
@@ -343,15 +367,23 @@ def api_client_heatmap_cell(
 
 
 @app.get("/api/summary")
-def api_summary(client: str | None = None, range: str | None = "1h", since: int | None = None):
+def api_summary(
+    client: str | None = None, tag: str | None = None,
+    range: str | None = "1h", since: int | None = None,
+):
+    who = _resolve_client_filter(client, tag)
     effective_since = _since_from_range(range, since)
-    return db.summary(client, effective_since, None)
+    return db.summary(who, effective_since, None)
 
 
 @app.get("/api/top-domains")
-def api_top_domains(client: str | None = None, range: str | None = "1h", limit: int = 15):
+def api_top_domains(
+    client: str | None = None, tag: str | None = None,
+    range: str | None = "1h", limit: int = 15,
+):
+    who = _resolve_client_filter(client, tag)
     effective_since = _since_from_range(range, None)
-    return db.top_domains(client, effective_since, limit)
+    return db.top_domains(who, effective_since, limit)
 
 
 @app.get("/api/top-clients")
@@ -406,6 +438,14 @@ class WebhookTest(BaseModel):
 
 class DeviceNameUpdate(BaseModel):
     name: str
+
+
+class TagCreate(BaseModel):
+    name: str
+
+
+class TagMemberAdd(BaseModel):
+    ip: str
 
 
 @app.get("/api/settings")
@@ -489,6 +529,42 @@ def api_delete_device_name(ip: str):
     if not names.delete_name(ip):
         raise HTTPException(status_code=404, detail="no manual name set for this ip")
     return {"deleted": ip}
+
+
+@app.get("/api/tags")
+def api_list_tags():
+    """Every client tag/group on record, each with its member IPs (#31) —
+    for the tag-management UI and the dashboard's client/tag filter."""
+    return tags.list_tags()
+
+
+@app.post("/api/tags")
+def api_create_tag(body: TagCreate):
+    try:
+        return tags.create_tag(body.name)
+    except tags.InvalidTag as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/tags/{tag_id}")
+def api_delete_tag(tag_id: int):
+    if not tags.delete_tag(tag_id):
+        raise HTTPException(status_code=404, detail="tag not found")
+    return {"deleted": tag_id}
+
+
+@app.post("/api/tags/{tag_id}/members")
+def api_add_tag_member(tag_id: int, body: TagMemberAdd):
+    if not tags.add_member(tag_id, body.ip):
+        raise HTTPException(status_code=404, detail="tag not found")
+    return {"tag_id": tag_id, "ip": body.ip}
+
+
+@app.delete("/api/tags/{tag_id}/members/{ip}")
+def api_remove_tag_member(tag_id: int, ip: str):
+    if not tags.remove_member(tag_id, ip):
+        raise HTTPException(status_code=404, detail="ip is not a member of this tag")
+    return {"tag_id": tag_id, "removed": ip}
 
 
 # Serve the built frontend (Docker build copies web/dist here). In local dev,

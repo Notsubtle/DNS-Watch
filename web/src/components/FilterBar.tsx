@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
-import { ClientInfo, Filters } from "../api";
+import { ClientInfo, Filters, Tag } from "../api";
 
 interface Props {
   filters: Filters;
   onChange: (f: Filters) => void;
   clients: ClientInfo[];
+  tags: Tag[];
   autoRefresh: boolean;
   onToggleAutoRefresh: () => void;
   csvHref: string;
@@ -28,7 +29,15 @@ function vendorLabel(c: ClientInfo): string {
   return "unknown vendor";
 }
 
-export default function FilterBar({ filters, onChange, clients, autoRefresh, onToggleAutoRefresh, csvHref }: Props) {
+export default function FilterBar({
+  filters,
+  onChange,
+  clients,
+  tags,
+  autoRefresh,
+  onToggleAutoRefresh,
+  csvHref,
+}: Props) {
   const [vendorSearch, setVendorSearch] = useState("");
 
   const visibleClients = useMemo(() => {
@@ -46,6 +55,21 @@ export default function FilterBar({ filters, onChange, clients, autoRefresh, onT
       ? [selectedClient, ...visibleClients]
       : visibleClients;
 
+  // A single dropdown covers both scopes (#31) -- "tag:<name>" or "ip:<ip>" --
+  // rather than two separate selects that would need their own mutual-
+  // exclusion bookkeeping. filters.client/filters.tag are still the plain
+  // values the rest of the app (and the API layer) reads.
+  const selectValue = filters.tag ? `tag:${filters.tag}` : filters.client ? `ip:${filters.client}` : "";
+  function handleScopeChange(value: string) {
+    if (value.startsWith("tag:")) {
+      onChange({ ...filters, tag: value.slice(4), client: "" });
+    } else if (value.startsWith("ip:")) {
+      onChange({ ...filters, client: value.slice(3), tag: "" });
+    } else {
+      onChange({ ...filters, client: "", tag: "" });
+    }
+  }
+
   return (
     <div className="filter-bar">
       <input
@@ -53,19 +77,27 @@ export default function FilterBar({ filters, onChange, clients, autoRefresh, onT
         placeholder="Search vendor…"
         value={vendorSearch}
         onChange={(e) => setVendorSearch(e.target.value)}
-        title="Narrow the client list below by vendor (e.g. &quot;Espressif&quot;)"
+        title="Narrow the device list below by vendor (e.g. &quot;Espressif&quot;)"
       />
 
-      <select
-        value={filters.client}
-        onChange={(e) => onChange({ ...filters, client: e.target.value })}
-      >
+      <select value={selectValue} onChange={(e) => handleScopeChange(e.target.value)}>
         <option value="">All clients</option>
-        {options.map((c) => (
-          <option key={c.ip} value={c.ip}>
-            {c.name} ({c.query_count})
-          </option>
-        ))}
+        {tags.length > 0 && (
+          <optgroup label="Tags">
+            {tags.map((t) => (
+              <option key={`tag:${t.name}`} value={`tag:${t.name}`}>
+                🏷 {t.name} ({t.ips.length})
+              </option>
+            ))}
+          </optgroup>
+        )}
+        <optgroup label="Devices">
+          {options.map((c) => (
+            <option key={c.ip} value={`ip:${c.ip}`}>
+              {c.name} ({c.query_count})
+            </option>
+          ))}
+        </optgroup>
       </select>
 
       <input

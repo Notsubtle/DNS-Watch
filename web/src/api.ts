@@ -218,9 +218,20 @@ export interface DeviceNameRow {
 
 export interface Filters {
   client: string; // "" = all
+  tag: string; // "" = no tag filter; mutually exclusive with client (#31)
   domain: string;
   status: string; // all | allowed | blocked
   range: string; // 15m | 1h | 24h | 7d
+}
+
+// A client tag/group (#31) — a user-defined label applied to a set of IPs,
+// so the dashboard filter and alert rules can scope to "all of these
+// devices" instead of one IP or every IP.
+export interface Tag {
+  id: number;
+  name: string;
+  created_at: number;
+  ips: string[];
 }
 
 function qs(params: Record<string, string | number | undefined>): string {
@@ -266,6 +277,7 @@ export const api = {
     getJson<QueriesResponse>(
       `/api/queries${qs({
         client: f.client,
+        tag: f.tag,
         domain: f.domain,
         status: f.status,
         range: f.range,
@@ -274,11 +286,13 @@ export const api = {
       })}`
     ),
 
-  summary: (f: Pick<Filters, "client" | "range">) =>
-    getJson<Summary>(`/api/summary${qs({ client: f.client, range: f.range })}`),
+  summary: (f: Pick<Filters, "client" | "tag" | "range">) =>
+    getJson<Summary>(`/api/summary${qs({ client: f.client, tag: f.tag, range: f.range })}`),
 
-  topDomains: (f: Pick<Filters, "client" | "range">) =>
-    getJson<TopEntry[]>(`/api/top-domains${qs({ client: f.client, range: f.range })}`),
+  topDomains: (f: Pick<Filters, "client" | "tag" | "range">) =>
+    getJson<TopEntry[]>(
+      `/api/top-domains${qs({ client: f.client, tag: f.tag, range: f.range })}`
+    ),
 
   topClients: (f: Pick<Filters, "range">) =>
     getJson<TopEntry[]>(`/api/top-clients${qs({ range: f.range })}`),
@@ -291,15 +305,25 @@ export const api = {
   clientDetail: (ip: string, range: string) =>
     getJson<ClientDetail>(`/api/client/${encodeURIComponent(ip)}${qs({ range })}`),
 
-  queryTypes: (f: Pick<Filters, "client" | "range">) =>
-    getJson<QueryTypeEntry[]>(`/api/query-types${qs({ client: f.client, range: f.range })}`),
+  queryTypes: (f: Pick<Filters, "client" | "tag" | "range">) =>
+    getJson<QueryTypeEntry[]>(
+      `/api/query-types${qs({ client: f.client, tag: f.tag, range: f.range })}`
+    ),
 
-  timeseries: (f: Pick<Filters, "client" | "range">, buckets = 60) =>
-    getJson<Timeseries>(`/api/timeseries${qs({ client: f.client, range: f.range, buckets })}`),
+  timeseries: (f: Pick<Filters, "client" | "tag" | "range">, buckets = 60) =>
+    getJson<Timeseries>(
+      `/api/timeseries${qs({ client: f.client, tag: f.tag, range: f.range, buckets })}`
+    ),
 
   // Returns the download URL for the current filter view (browser handles the download).
   csvUrl: (f: Filters) =>
-    `/api/queries.csv${qs({ client: f.client, domain: f.domain, status: f.status, range: f.range })}`,
+    `/api/queries.csv${qs({
+      client: f.client,
+      tag: f.tag,
+      domain: f.domain,
+      status: f.status,
+      range: f.range,
+    })}`,
 
   anomalies: () => getJson<Anomaly[]>("/api/anomalies"),
 
@@ -348,6 +372,17 @@ export const api = {
     sendJson<{ ip: string; name: string }>(`/api/device-names/${encodeURIComponent(ip)}`, "PUT", { name }),
   deleteDeviceName: (ip: string) =>
     sendJson<{ deleted: string }>(`/api/device-names/${encodeURIComponent(ip)}`, "DELETE"),
+
+  listTags: () => getJson<Tag[]>("/api/tags"),
+  createTag: (name: string) => sendJson<Tag>("/api/tags", "POST", { name }),
+  deleteTag: (id: number) => sendJson<{ deleted: number }>(`/api/tags/${id}`, "DELETE"),
+  addTagMember: (id: number, ip: string) =>
+    sendJson<{ tag_id: number; ip: string }>(`/api/tags/${id}/members`, "POST", { ip }),
+  removeTagMember: (id: number, ip: string) =>
+    sendJson<{ tag_id: number; removed: string }>(
+      `/api/tags/${id}/members/${encodeURIComponent(ip)}`,
+      "DELETE"
+    ),
 
   getSettings: () => getJson<AppSettings>("/api/settings"),
   updateSettings: (patch: AppSettingsUpdate) =>
