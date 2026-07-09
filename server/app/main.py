@@ -392,6 +392,21 @@ def api_top_clients(range: str | None = "1h", limit: int = 15):
     return db.top_clients(effective_since, limit)
 
 
+@app.get("/api/domain-fanout")
+def api_domain_fanout(
+    range: str | None = "1h",
+    since: int | None = None,
+    bucket_minutes: int = Query(5, ge=1, le=60),
+    min_clients: int = Query(3, ge=2, le=1000),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Domains hit by several distinct clients within one short window (#34)
+    -- see db.domain_fanout for why this is bucketed rather than a flat
+    whole-range distinct-client count."""
+    effective_since = _since_from_range(range, since)
+    return db.domain_fanout(effective_since, None, bucket_minutes, min_clients, limit)
+
+
 @app.get("/api/anomalies")
 def api_anomalies():
     """Automatic silent/spike detection against each client's own 7-day

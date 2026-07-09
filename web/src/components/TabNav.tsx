@@ -1,10 +1,11 @@
-export type View = "dashboard" | "stream" | "simulator" | "heatmap";
+export type View = "dashboard" | "stream" | "simulator" | "heatmap" | "fanout";
 
 const TABS: { id: View; label: string }[] = [
   { id: "dashboard", label: "Dashboard" },
   { id: "stream", label: "Live Stream" },
   { id: "simulator", label: "Blocklist Simulator" },
   { id: "heatmap", label: "Client Heatmaps" },
+  { id: "fanout", label: "Domain Fan-out" },
 ];
 
 interface Props {

@@ -312,7 +312,7 @@ The app is organised into tabs: a **Dashboard** (everything below down to
 
 ## Analysis tabs
 
-Beyond the dashboard, three purpose-built views for digging into a specific question:
+Beyond the dashboard, four purpose-built views for digging into a specific question:
 
 - **Live Stream ("tail -f")** — a real-time console where new queries stream in at
   the top as they land (short-interval polling), for watching exactly what a device
@@ -335,6 +335,16 @@ Beyond the dashboard, three purpose-built views for digging into a specific ques
   workflow). Timezone conversion is done explicitly in the backend from the browser's
   own IANA zone, so "the middle of the night" is correct regardless of the container's
   clock configuration.
+- **Domain Fan-out** — domains queried by several *different* devices within the same
+  short window, surfacing synchronized beaconing (several IoT devices phoning the same
+  tracker/C2 near-simultaneously) that a per-client view structurally can't show.
+  Deliberately **not** "popular over the whole range": a CDN/ad/telemetry domain is
+  *supposed* to be hit by every device eventually, so a flat distinct-client count
+  would be constantly noisy on completely benign traffic. Requiring the clients to
+  cluster into one configurable window (default 5 minutes, ≥ 3 clients) is what
+  actually signals "near-simultaneous" rather than "generally popular" — tune both to
+  taste. A passive, on-demand view rather than an alert rule; this is exploratory data
+  worth a human's judgment, not something worth paging someone over.
 
 ## Notes / limitations
 

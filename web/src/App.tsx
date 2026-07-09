@@ -33,6 +33,7 @@ import TabNav, { View } from "./components/TabNav";
 import LiveStreamTab from "./components/LiveStreamTab";
 import SimulatorTab from "./components/SimulatorTab";
 import ClientHeatmapTab from "./components/ClientHeatmapTab";
+import FanoutTab from "./components/FanoutTab";
 
 // The smallest preset range (FilterBar only offers fixed buckets, no
 // arbitrary since/until) that fully contains an anomaly's detection window —
@@ -338,6 +339,7 @@ export default function App() {
       {view === "stream" && <LiveStreamTab />}
       {view === "simulator" && <SimulatorTab />}
       {view === "heatmap" && <ClientHeatmapTab clients={clients} />}
+      {view === "fanout" && <FanoutTab />}
 
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
 
