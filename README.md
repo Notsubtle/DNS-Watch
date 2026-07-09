@@ -32,26 +32,34 @@ go looking:
 - **Privacy-minded** — see which smart TV, speaker, or doorbell phones home the
   most, and to which trackers.
 - **Parents / households** — watch what a specific device is doing, or get alerted
-  when it hits domains you care about.
+  when it hits domains you care about. Group devices under a **tag** (e.g. "kids",
+  "guest") to filter the dashboard or scope a rule to the whole group at once,
+  instead of duplicating it per device.
 - **Security hobbyists** — get flagged when a **new/unknown device** joins (including
   by **vendor**: a device whose manufacturer can't be identified at all, or the first
-  device on your network from a brand you've never seen before), when a device's query
-  volume **spikes** (possible malware or DNS exfiltration), or when a normally-active
-  device **goes quiet** (offline or tampered with). Spikes and silences are also
-  surfaced **automatically** in a **Network Anomalies** panel, measured against each
-  device's *own* 7-day baseline — no rule setup required.
+  device on your network from a brand you've never seen before), when a **domain no
+  client has ever queried before** shows up network-wide, when a device queries a
+  **known DoH/DoT provider** (a signal it may be setting up a path around Pi-hole),
+  when a device's query volume **spikes** (possible malware or DNS exfiltration), or
+  when a normally-active device **goes quiet** (offline or tampered with). Spikes and
+  silences are also surfaced **automatically** in a **Network Anomalies** panel,
+  measured against each device's *own* 7-day baseline — no rule setup required.
 - **Tinkerers** — a filterable, per-client live log for debugging a chatty device or
   a false-positive block.
 - **Investigators** — when something looks off, dedicated tools to dig in: a live
   **"tail -f" stream** to watch queries scroll by in real time (with your own colour
   highlight rules), a **blocklist simulator** to measure what a Pi-hole-style regex
-  *would* have blocked over the last 7 days before you commit it, and a per-client
+  *would* have blocked over the last 7 days before you commit it, a per-client
   **activity heatmap** that exposes background chatter during the hours a device is
-  supposed to be idle.
+  supposed to be idle, and a **domain fan-out** view that surfaces several devices
+  hitting the same domain within the same short window — synchronized beaconing a
+  per-client view can't show on its own.
 
 The feature that makes it more than a prettier Pi-hole dashboard is **headless
 alerting**: rules are evaluated server-side on a timer and pushed out via webhook,
-so it *tells you* about things instead of only showing them when you happen to look.
+so it *tells you* about things instead of only showing them when you happen to look
+— including as an optional daily/weekly **digest** for anyone who'd rather get one
+summary than a stream of individual alerts.
 
 **Honest scope:** DNS Watch *observes* — it doesn't block (Pi-hole does that) and it
 isn't a full intrusion-detection system. It only sees DNS *names* that actually pass
