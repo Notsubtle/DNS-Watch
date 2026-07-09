@@ -45,6 +45,31 @@ def _insert(ftl, domain: str, ip: str, ts: float) -> None:
     conn.close()
 
 
+def test_uses_id_fast_path_on_normalized_schema(ftl, monkeypatch):
+    """#34: the normalized (has_id_storage) schema must route through the
+    query_storage fast path, not the `queries` view -- a GROUP BY there pays
+    the view's per-row correlated subquery for every row in the window before
+    it can even filter/limit (unlike list_queries/tail_queries, which can stop
+    early via ORDER BY+LIMIT on an index). Measured ~2.8x slower through the
+    view for a 7-day window against the real UAT snapshot. Pins the routing
+    decision so a future refactor can't silently regress it back to the view."""
+    from app import db
+
+    calls = []
+    orig = db._domain_fanout_id
+
+    def spy(*args):
+        calls.append(args)
+        return orig(*args)
+
+    monkeypatch.setattr(db, "_domain_fanout_id", spy)
+    db.domain_fanout(int(time.time()) - 3600, None, bucket_minutes=5, min_clients=3)
+    if ftl["schema"] == "idstore":
+        assert calls, "expected the query_storage fast path on the normalized schema"
+    else:
+        assert not calls
+
+
 def test_clustered_burst_qualifies(ftl):
     """Three distinct clients hitting the same brand-new domain within a
     single 5-minute bucket must be surfaced, with the correct client list."""

@@ -27,10 +27,24 @@ export default function FanoutTab() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Debounce the two number inputs (same pattern as the dashboard's domain
+  // search in App.tsx) so adjusting them with the keyboard or a spinner
+  // doesn't fire a request per keystroke/click.
+  const [debouncedBucketMinutes, setDebouncedBucketMinutes] = useState(bucketMinutes);
+  const [debouncedMinClients, setDebouncedMinClients] = useState(minClients);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedBucketMinutes(bucketMinutes), 300);
+    return () => clearTimeout(t);
+  }, [bucketMinutes]);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedMinClients(minClients), 300);
+    return () => clearTimeout(t);
+  }, [minClients]);
+
   function load() {
     setLoading(true);
     api
-      .domainFanout(range, bucketMinutes, minClients)
+      .domainFanout(range, debouncedBucketMinutes, debouncedMinClients)
       .then((rows) => {
         setEntries(rows);
         setError(null);
@@ -39,7 +53,7 @@ export default function FanoutTab() {
       .finally(() => setLoading(false));
   }
 
-  useEffect(load, [range, bucketMinutes, minClients]);
+  useEffect(load, [range, debouncedBucketMinutes, debouncedMinClients]);
 
   return (
     <div className="fanout-tab">
