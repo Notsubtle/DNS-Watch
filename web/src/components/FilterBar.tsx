@@ -1,3 +1,4 @@
+import { useMemo, useState } from "react";
 import { ClientInfo, Filters } from "../api";
 
 interface Props {
@@ -17,15 +18,50 @@ const RANGES = [
   { value: "all", label: "All" },
 ];
 
+// Mirrors DeviceNamesModal's vendorLabel so a vendor search can match the
+// same "private MAC"/"unknown vendor" text the user actually sees elsewhere,
+// not just clients with a resolved vendor name.
+function vendorLabel(c: ClientInfo): string {
+  if (c.vendor) return c.vendor;
+  if (!c.mac_known) return "";
+  if (c.vendor_unknown_reason === "randomized") return "private MAC";
+  return "unknown vendor";
+}
+
 export default function FilterBar({ filters, onChange, clients, autoRefresh, onToggleAutoRefresh, csvHref }: Props) {
+  const [vendorSearch, setVendorSearch] = useState("");
+
+  const visibleClients = useMemo(() => {
+    const q = vendorSearch.trim().toLowerCase();
+    if (!q) return clients;
+    return clients.filter((c) => vendorLabel(c).toLowerCase().includes(q));
+  }, [clients, vendorSearch]);
+
+  // The currently selected client stays choosable even if a vendor search
+  // narrows it out of view, so the filter bar never silently drops an
+  // already-active dashboard-wide selection.
+  const selectedClient = clients.find((c) => c.ip === filters.client);
+  const options =
+    selectedClient && !visibleClients.includes(selectedClient)
+      ? [selectedClient, ...visibleClients]
+      : visibleClients;
+
   return (
     <div className="filter-bar">
+      <input
+        type="text"
+        placeholder="Search vendor…"
+        value={vendorSearch}
+        onChange={(e) => setVendorSearch(e.target.value)}
+        title="Narrow the client list below by vendor (e.g. &quot;Espressif&quot;)"
+      />
+
       <select
         value={filters.client}
         onChange={(e) => onChange({ ...filters, client: e.target.value })}
       >
         <option value="">All clients</option>
-        {clients.map((c) => (
+        {options.map((c) => (
           <option key={c.ip} value={c.ip}>
             {c.name} ({c.query_count})
           </option>
