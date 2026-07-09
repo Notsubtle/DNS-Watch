@@ -7,6 +7,7 @@ const TYPE_LABELS: Record<RuleType, string> = {
   domain_keyword: "Domain keyword",
   device_quiet: "Device went quiet",
   new_vendor: "Unrecognized/new vendor",
+  doh_provider: "Known DoH/DoT provider query",
 };
 
 function describe(rule: AlertRule): string {
@@ -20,6 +21,9 @@ function describe(rule: AlertRule): string {
   }
   if (rule.type === "new_vendor") {
     return `new device with an unrecognized or first-seen vendor within ${p.window_minutes ?? 1440}m`;
+  }
+  if (rule.type === "doh_provider") {
+    return `a client queries a known DoH/DoT provider domain (setup/fallback lookups, not confirmed bypass) within ${p.window_minutes ?? 60}m`;
   }
   if (rule.type === "device_quiet") {
     return `active client (≥ ${p.min_prior ?? 20} queries) goes silent for ${p.window_minutes ?? 60}m`;
@@ -62,7 +66,7 @@ export default function RulesModal({ onClose, onChange }: Props) {
     if (type === "volume_threshold") {
       return { scope, threshold, window_minutes: windowMin };
     }
-    if (type === "new_device" || type === "new_vendor") {
+    if (type === "new_device" || type === "new_vendor" || type === "doh_provider") {
       return { window_minutes: windowMin };
     }
     if (type === "device_quiet") {
