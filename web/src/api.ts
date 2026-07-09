@@ -103,6 +103,23 @@ export interface SimulationResult {
   clients: SimulationClientImpact[];
 }
 
+// Cross-client domain fan-out (#34) — a domain hit by several distinct
+// clients within one short window, surfacing synchronized beaconing a
+// per-client view can't show.
+export interface FanoutClient {
+  ip: string;
+  name: string;
+}
+
+export interface FanoutEntry {
+  domain: string;
+  window_start: number;
+  window_end: number;
+  client_count: number;
+  query_count: number;
+  clients: FanoutClient[];
+}
+
 export type RuleType =
   | "volume_threshold"
   | "new_device"
@@ -340,6 +357,11 @@ export const api = {
 
   simulateBlocklist: (pattern: string) =>
     sendJson<SimulationResult>("/api/simulate-blocklist", "POST", { pattern, range: "7d" }),
+
+  domainFanout: (range: string, bucketMinutes: number, minClients: number) =>
+    getJson<FanoutEntry[]>(
+      `/api/domain-fanout${qs({ range, bucket_minutes: bucketMinutes, min_clients: minClients })}`
+    ),
 
   clientHeatmap: (ip: string, days = 7) =>
     getJson<HeatmapResult>(

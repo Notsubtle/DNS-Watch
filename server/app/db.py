@@ -1757,6 +1757,121 @@ def _doh_provider_hits_id(since: int) -> list[dict]:
     return out
 
 
+# --------------------------------------------------------------------------
+# Cross-client domain fan-out (#34)
+#
+# "Which domains got hit by several distinct clients within the same SHORT
+# window" -- surfaces synchronized beaconing (several IoT devices phoning the
+# same tracker/C2 near-simultaneously) that a per-client view structurally
+# can't show. Deliberately NOT "count distinct clients over the whole
+# selected range": a CDN/ad/telemetry domain is *supposed* to be hit by every
+# device over a long enough range, so that flat count would be constantly
+# noisy on completely benign traffic (the exact false-positive both the
+# Claude and Codex product-review scopings for this issue flagged). Requiring
+# the distinct clients to cluster into one short bucket is what actually
+# signals "near-simultaneous", not "generally popular".
+#
+# Deliberately a bounded-range-only, on-demand view (like Live Stream /
+# Blocklist Simulator / Client Heatmaps) -- not a rollup-backed "All" mode and
+# not an alert rule. Uses the `queries` view directly (same as list_queries/
+# tail_queries), which is fine for a bounded window; the per-row correlated
+# subquery cost this module works hard to avoid elsewhere is specifically a
+# WHOLE-TABLE-unbounded-scan problem (see the has_id_storage module note),
+# not a bounded-range one.
+# --------------------------------------------------------------------------
+
+FANOUT_MAX_LOOKBACK_SECONDS = 7 * 86400  # mirrors simulate_pattern's 7-day cap
+FANOUT_LIMIT = 50
+
+
+def domain_fanout(
+    since: int | None,
+    until: int | None = None,
+    bucket_minutes: int = 5,
+    min_clients: int = 3,
+    limit: int = FANOUT_LIMIT,
+) -> list[dict]:
+    """Domains queried by >= min_clients distinct clients within one
+    bucket_minutes-wide window, most-clients-first. Each entry: {"domain",
+    "window_start", "window_end", "client_count", "query_count", "clients":
+    [{"ip", "name"}, ...]}.
+
+    `since` is hard-capped to FANOUT_MAX_LOOKBACK_SECONDS -- this is a
+    bounded-range view, never an "All" scan (see module note above).
+
+    Buckets are FIXED windows anchored to `since` (bucket N covers
+    [since + N*bucket_seconds, since + (N+1)*bucket_seconds)), not a sliding
+    window -- a genuine burst that happens to straddle one of these fixed
+    boundaries could split across two buckets and under-count. Accepted
+    tradeoff for v1: a sliding window is the correct fix but meaningfully
+    more expensive to compute, and a real synchronized burst (queries within
+    seconds of each other, not minutes) is overwhelmingly unlikely to land
+    exactly on a boundary in practice.
+    """
+    now = int(time.time())
+    until = until if until is not None else now
+    earliest = now - FANOUT_MAX_LOOKBACK_SECONDS
+    since = earliest if since is None else max(since, earliest)
+    bucket_seconds = max(60, int(bucket_minutes) * 60)
+
+    select, join = _client_join_sql()
+    client_col = _client_ip_col()
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT q.domain AS domain,
+                   CAST((q.timestamp - ?) / ? AS INTEGER) AS bucket,
+                   COUNT(DISTINCT {client_col}) AS client_count,
+                   COUNT(*) AS query_count
+            FROM queries q
+            {join}
+            WHERE q.timestamp >= ? AND q.timestamp < ?
+            GROUP BY q.domain, bucket
+            HAVING client_count >= ?
+            ORDER BY client_count DESC, bucket DESC
+            LIMIT ?
+            """,
+            [since, bucket_seconds, since, until, min_clients, limit],
+        ).fetchall()
+
+        resolved = resolve.get_names()
+        manual = names.get_names()
+        out = []
+        for r in rows:
+            window_start = since + r["bucket"] * bucket_seconds
+            window_end = window_start + bucket_seconds
+            # A bounded follow-up per qualifying (domain, window) pair -- capped
+            # at `limit` rows total, so at most `limit` extra queries for an
+            # on-demand exploratory view, not a hot path. Reuses the same
+            # select/join as the aggregate above so Pi-hole's own client_name
+            # (not just the bare ip) resolves correctly.
+            crows = conn.execute(
+                f"""
+                SELECT DISTINCT {select}
+                FROM queries q
+                {join}
+                WHERE q.domain = ? AND q.timestamp >= ? AND q.timestamp < ?
+                """,
+                [r["domain"], window_start, window_end],
+            ).fetchall()
+            clients = [
+                {
+                    "ip": c["client_ip"],
+                    "name": _display_name(c["client_name"], c["client_ip"], resolved, manual),
+                }
+                for c in crows
+            ]
+            out.append({
+                "domain": r["domain"],
+                "window_start": window_start,
+                "window_end": window_end,
+                "client_count": r["client_count"],
+                "query_count": r["query_count"],
+                "clients": clients,
+            })
+    return out
+
+
 TOP_DOMAINS_LIMIT = 50  # how many matched domains the breakdown returns
 
 # Caps the AGGREGATE wall-clock cost of one simulate_pattern() call, independent
