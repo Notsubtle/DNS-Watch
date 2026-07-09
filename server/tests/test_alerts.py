@@ -104,6 +104,82 @@ def test_device_quiet_rule(client, ftl):
         assert db.PRESENCE_MAC_UNKNOWN_NOTE in msg
 
 
+def test_new_vendor_rule(client, ftl):
+    """#12: complementary to new_device, but keyed on vendor rather than raw
+    IP/first-seen. Only "real"/"idstore" schemas carry vendor data at all
+    (see #4) -- db.vendor_alert_candidates() is a guaranteed no-op elsewhere,
+    covered by test_new_vendor_rule_noop_without_vendor_data below."""
+    if ftl["schema"] not in ("real", "idstore"):
+        return
+    import sqlite3
+    from conftest import _idstore_client_id, _idstore_domain_id
+
+    now = int(time.time())
+    conn = sqlite3.connect(ftl["path"])
+    if ftl["schema"] == "real":
+        # A brand-new device from a vendor never seen on this network before.
+        conn.execute("INSERT INTO network (id, hwaddr, macVendor) VALUES (99,'aa:bb:cc:dd:ee:99','NewCo')")
+        conn.execute("INSERT INTO network_addresses (network_id, ip, lastSeen, name, nameUpdated) "
+                     "VALUES (99,'192.168.1.99',?,NULL,?)", (now, now))
+        conn.execute("INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                     (float(now), 1, 2, "a.example.com", "192.168.1.99"))
+        # A brand-new device with a real MAC that matches no vendor at all.
+        conn.execute("INSERT INTO network (id, hwaddr, macVendor) VALUES (100,'10:20:30:99:99:99','')")
+        conn.execute("INSERT INTO network_addresses (network_id, ip, lastSeen, name, nameUpdated) "
+                     "VALUES (100,'192.168.1.100',?,NULL,?)", (now, now))
+        conn.execute("INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                     (float(now), 1, 2, "b.example.com", "192.168.1.100"))
+    else:
+        cur = conn.cursor()
+        cid_new_vendor = _idstore_client_id(cur, "192.168.1.99", None)
+        conn.execute(
+            "UPDATE network SET hwaddr='aa:bb:cc:dd:ee:99', macVendor='NewCo' WHERE id = "
+            "(SELECT network_id FROM network_addresses WHERE ip='192.168.1.99')"
+        )
+        did = _idstore_domain_id(cur, "a.example.com")
+        conn.execute("INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                     (now, 1, 2, did, cid_new_vendor))
+
+        cid_unlisted = _idstore_client_id(cur, "192.168.1.100", None)
+        conn.execute(
+            "UPDATE network SET hwaddr='10:20:30:99:99:99', macVendor='' WHERE id = "
+            "(SELECT network_id FROM network_addresses WHERE ip='192.168.1.100')"
+        )
+        did2 = _idstore_domain_id(cur, "b.example.com")
+        conn.execute("INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                     (now, 1, 2, did2, cid_unlisted))
+    conn.commit()
+    conn.close()
+
+    client.post("/api/alert-rules", json={
+        "name": "Vendor", "type": "new_vendor", "params": {"window_minutes": 60}})
+    events = client.get("/api/alerts").json()["events"]
+    vendor_events = [e for e in events if e["type"] == "new_vendor"]
+
+    assert any("NewCo" in e["message"] and "192.168.1.99" in e["message"] for e in vendor_events)
+    assert any(
+        "unrecognized" in e["message"].lower() and "192.168.1.100" in e["message"]
+        for e in vendor_events
+    )
+    # Whether the 4 standard CLIENTS (all sharing macVendor "TestVendor") also
+    # count as "new" here depends on build_ftl's random first-seen offsets --
+    # not deterministic enough to assert on directly in this fixture. The
+    # "an already-established vendor doesn't re-fire" invariant is instead
+    # covered precisely in test_db.py, with an exact, controlled after_ts.
+
+
+def test_new_vendor_rule_noop_without_vendor_data(client, ftl):
+    """#12: schemas with no vendor table at all must never fire this rule --
+    every device would otherwise look "unrecognized" from a data gap, not an
+    actual finding (see db.vendor_alert_candidates)."""
+    if ftl["schema"] in ("real", "idstore"):
+        return
+    client.post("/api/alert-rules", json={
+        "name": "Vendor", "type": "new_vendor", "params": {"window_minutes": 6000}})
+    events = client.get("/api/alerts").json()["events"]
+    assert not any(e["type"] == "new_vendor" for e in events)
+
+
 def test_settings_roundtrip_and_format_validation(client):
     assert client.get("/api/settings").json()["webhook_enabled"] is False
     updated = client.patch("/api/settings", json={

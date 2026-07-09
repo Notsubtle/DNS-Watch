@@ -1526,6 +1526,54 @@ def _new_clients_id(after_ts: int) -> list[dict]:
     return out
 
 
+def vendor_alert_candidates(after_ts: int) -> list[dict]:
+    """New clients (see new_clients) classified for the new_vendor alert rule
+    (#12), complementary to new_device: that rule fires on any new IP,
+    regardless of vendor; this one is keyed on the vendor itself.
+
+    Returns [] entirely when this schema carries no vendor data at all (#4) --
+    flagging "unrecognized vendor" for every new device would be a false
+    signal from a data gap, not an actual unrecognized-hardware finding.
+
+    Each entry is {"ip", "name", "first_seen", "vendor", "kind"}, where kind is:
+      - "unrecognized": no vendor could be resolved for this device at all
+        (no MAC captured, a randomized/private MAC, or a real MAC with no
+        match in Pi-hole's own table or our offline OUI fallback).
+      - "new_vendor": a vendor WAS resolved, but no other client that already
+        existed before this window carries that same vendor string -- the
+        network's first device from that manufacturer.
+    A resolved vendor already seen on an established (pre-window) client is
+    not a candidate at all -- e.g. "another device from the vendor you
+    already have" isn't noteworthy.
+    """
+    if not detect_schema().has_vendor_data:
+        return []
+    new = new_clients(after_ts)
+    if not new:
+        return []
+    with _connect() as conn:
+        vmap = _client_vendor_map(conn)
+    new_ips = {c["ip"] for c in new}
+    established_vendors = {
+        v["vendor"] for ip, v in vmap.items() if ip not in new_ips and v.get("vendor")
+    }
+    out = []
+    for c in new:
+        v = _vendor_fields(c["ip"], vmap)
+        vendor = v["vendor"]
+        if vendor and vendor in established_vendors:
+            continue
+        kind = "new_vendor" if vendor else "unrecognized"
+        out.append({
+            "ip": c["ip"],
+            "name": c["name"],
+            "first_seen": c["first_seen"],
+            "vendor": vendor,
+            "kind": kind,
+        })
+    return out
+
+
 TOP_DOMAINS_LIMIT = 50  # how many matched domains the breakdown returns
 
 # Caps the AGGREGATE wall-clock cost of one simulate_pattern() call, independent

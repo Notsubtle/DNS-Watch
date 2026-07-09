@@ -103,7 +103,12 @@ export interface SimulationResult {
   clients: SimulationClientImpact[];
 }
 
-export type RuleType = "volume_threshold" | "new_device" | "domain_keyword" | "device_quiet";
+export type RuleType =
+  | "volume_threshold"
+  | "new_device"
+  | "domain_keyword"
+  | "device_quiet"
+  | "new_vendor";
 
 export interface AlertRule {
   id: number;
