@@ -25,7 +25,7 @@ import time
 import urllib.parse
 from datetime import datetime, timezone
 
-from app import db, tags
+from app import db, rollups, tags
 
 STORE_PATH = os.environ.get("DNSWATCH_DB_PATH", "/data/dnswatch.db")
 
@@ -36,7 +36,7 @@ _eval_lock = threading.Lock()
 
 VALID_TYPES = {
     "volume_threshold", "new_device", "domain_keyword", "device_quiet",
-    "new_vendor", "doh_provider", "digest",
+    "new_vendor", "doh_provider", "digest", "first_seen_domain",
 }
 
 # Webhook payload shapes. "generic" is DNS Watch's own JSON; "slack"/"discord"
@@ -55,6 +55,7 @@ DEFAULT_COOLDOWN = {
     "device_quiet": 3600,
     "new_vendor": 86400,
     "doh_provider": 86400,
+    "first_seen_domain": 86400,
     # No entry for "digest": its firing is gated on a calendar-period
     # boundary (see digest_schedule / _dedup_exists below), not an
     # elapsed-time cooldown, since that's the whole point of a digest.
@@ -621,6 +622,25 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
                   f"setting up or falling back to a DNS resolver that bypasses Pi-hole, "
                   f"not confirmation that it has",
                   f"doh:{rule['id']}:{hit['ip']}:{hit['provider']}")
+
+    elif rule["type"] == "first_seen_domain":
+        # Domain-keyed sibling of new_device/new_vendor (#32): fires when a
+        # domain is queried that NO client has ever queried before,
+        # network-wide -- backed by rollups.new_domains(), an incrementally
+        # maintained table (domain cardinality is unbounded, unlike a LAN's
+        # handful of clients, so this can't be a live scan the way
+        # new_clients() is). None (not []) means the rollup isn't ready yet
+        # -- e.g. before the first backfill completes -- and must be treated
+        # as "no signal this tick", not "no new domains".
+        window_min = int(p.get("window_minutes", 1440))
+        since = now - window_min * 60
+        new_doms = rollups.new_domains(since)
+        if new_doms is None:
+            return
+        for d in new_doms:
+            _emit(pending, rule, "info",
+                  f"New domain seen for the first time: {d['domain']}",
+                  f"domain:{rule['id']}:{d['domain']}")
 
     elif rule["type"] == "device_quiet":
         # Fire when a client that was active in the *prior* window has gone

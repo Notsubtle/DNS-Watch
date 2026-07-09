@@ -154,6 +154,20 @@ def init_rollup_store() -> None:
                 count INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (ip, day)
             );
+            -- #32: first-ever-seen timestamp per domain, network-wide -- backs
+            -- the first_seen_domain alert rule. Populated the SAME way every
+            -- other rollup table is (one more delta accumulated per batch in
+            -- refresh_rollups, see _Deltas/_apply below), not a second
+            -- incremental mechanism. A live "MIN(timestamp) GROUP BY domain"
+            -- scan doesn't work here the way it does for clients: domain
+            -- cardinality is unbounded (unlike a LAN's handful of clients), so
+            -- this needs the same incremental-cache treatment as the other
+            -- whole-table aggregates in this module.
+            CREATE TABLE IF NOT EXISTS seen_domains (
+                domain TEXT PRIMARY KEY,
+                first_seen INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_seen_domains_first_seen ON seen_domains (first_seen);
             CREATE TABLE IF NOT EXISTS rollup_cursor (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 last_query_id INTEGER,
@@ -210,6 +224,7 @@ _ROLLUP_TABLES = (
     "daily_totals",
     "client_domain_rollup",
     "client_activity_rollup",
+    "seen_domains",
 )
 
 
@@ -336,6 +351,14 @@ class _Deltas:
         self.daily: dict[str, list[int]] = {}  # day -> [allowed, blocked, unknown]
         self.client_domain: dict[tuple[str, str], int] = {}
         self.client_activity: dict[tuple[str, str], int] = {}
+        # domain -> first_seen (#32). Rows within a batch are processed in
+        # ascending (timestamp, id) order (see _fetch_batch*), so the first
+        # occurrence recorded here per batch is already that domain's earliest
+        # timestamp in this batch -- setdefault, never overwritten within a
+        # batch. _apply's INSERT OR IGNORE then preserves whichever batch got
+        # there first across the whole drain, since batches themselves are
+        # also strictly ascending.
+        self.domain_first_seen: dict[str, int] = {}
 
     def add(self, row: dict) -> None:
         ts = row["timestamp"]
@@ -364,6 +387,7 @@ class _Deltas:
 
         if domain is not None:
             self.domain[domain] = self.domain.get(domain, 0) + 1
+            self.domain_first_seen.setdefault(domain, int(ts))
 
         if ip is not None:
             ic = int(ts)
@@ -433,6 +457,13 @@ def _apply(conn: sqlite3.Connection, deltas: _Deltas) -> None:
             "INSERT INTO client_activity_rollup (ip, day, count) VALUES (?, ?, ?) "
             "ON CONFLICT(ip, day) DO UPDATE SET count = count + excluded.count",
             [(ip, day, n) for (ip, day), n in deltas.client_activity.items()],
+        )
+    if deltas.domain_first_seen:
+        # IGNORE, never UPDATE -- once a domain's first_seen is recorded, no
+        # later batch (all strictly newer, by construction) may overwrite it.
+        conn.executemany(
+            "INSERT OR IGNORE INTO seen_domains (domain, first_seen) VALUES (?, ?)",
+            list(deltas.domain_first_seen.items()),
         )
 
 
@@ -917,3 +948,28 @@ def read_client_activity(limit: int) -> list[dict] | None:
         }
         for t in top
     ]
+
+
+def new_domains(after_ts: int) -> list[dict] | None:
+    """Domains first ever queried at or after `after_ts`, network-wide (#32) --
+    backs the first_seen_domain alert rule, the domain-keyed sibling of
+    new_device/new_vendor.
+
+    Returns None (not an empty list) when the rollup isn't ready yet (never
+    backfilled, or a reconciliation is mid-rebuild -- see _rollups_ready):
+    seen_domains would be incomplete for a reason unrelated to the real data,
+    so every domain in a partial table would incorrectly look "first seen"
+    just now. The caller (alerts.py) must treat None as "no signal this tick",
+    never as "no new domains" -- an empty list IS a valid, meaningful answer
+    once the rollup is trusted, so the two cases are kept distinct.
+    """
+    init_rollup_store()
+    with _connect() as conn:
+        if not _rollups_ready(conn):
+            return None
+        rows = conn.execute(
+            "SELECT domain, first_seen FROM seen_domains WHERE first_seen >= ? "
+            "ORDER BY first_seen DESC",
+            [after_ts],
+        ).fetchall()
+    return [{"domain": r["domain"], "first_seen": r["first_seen"]} for r in rows]

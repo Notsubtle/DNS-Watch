@@ -152,6 +152,72 @@ def test_device_quiet_rule(client, ftl):
         assert db.PRESENCE_MAC_UNKNOWN_NOTE in msg
 
 
+def test_first_seen_domain_rule(client, ftl):
+    """#32: domain-keyed sibling of new_device/new_vendor -- fires when a
+    domain is queried that NO client has ever queried before, network-wide.
+    Backed by rollups.new_domains(), so the rollup must be backfilled first
+    (mirroring how a real deployment's scheduler tick would have already run
+    at least once) before the new domain is inserted and picked up by a
+    second refresh."""
+    from app import rollups
+    import sqlite3
+
+    rollups.refresh_rollups()  # backfill everything build_ftl already seeded
+
+    now = int(time.time())
+    brand_new_domain = "totally-new-domain.example"
+    conn = sqlite3.connect(ftl["path"])
+    if ftl["schema"] == "new":
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,1)",
+            (now, 1, 2, brand_new_domain),
+        )
+    elif ftl["schema"] == "idstore":
+        from conftest import _idstore_client_id, _idstore_domain_id
+        cur = conn.cursor()
+        cid = _idstore_client_id(cur, "192.168.1.10", "laptop")
+        did = _idstore_domain_id(cur, brand_new_domain)
+        conn.execute(
+            "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (now, 1, 2, did, cid),
+        )
+    else:  # "old" / "real"
+        ts = float(now) if ftl["schema"] == "real" else now
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (ts, 1, 2, brand_new_domain, "192.168.1.10"),
+        )
+    conn.commit()
+    conn.close()
+
+    rollups.refresh_rollups()  # pick up the new domain into seen_domains
+
+    client.post("/api/alert-rules", json={
+        "name": "NewDomain", "type": "first_seen_domain", "params": {"window_minutes": 60}})
+    events = client.get("/api/alerts").json()["events"]
+    dom_events = [e for e in events if e["type"] == "first_seen_domain"]
+
+    assert dom_events and any(brand_new_domain in e["message"] for e in dom_events)
+    # Whether build_ftl's own fixture domains also count as "new" here depends
+    # on its random first-seen offsets landing inside this same 60m window --
+    # not deterministic enough to assert on in this fixture (same caveat as
+    # test_new_vendor_rule's analogous note). The precise "an already-seen
+    # domain outside the window doesn't re-fire" invariant is covered exactly,
+    # with a controlled cutoff, by test_new_domains_matches_ground_truth in
+    # test_rollup_reads.py.
+
+
+def test_first_seen_domain_rule_noop_before_rollup_backfilled(client, ftl):
+    """Before the rollup has ever been backfilled, rollups.new_domains()
+    returns None (not []) -- the rule must treat that as "no signal yet",
+    not misfire on every domain in build_ftl's fixture looking spuriously
+    "new" from an empty seen_domains table."""
+    client.post("/api/alert-rules", json={
+        "name": "NewDomain", "type": "first_seen_domain", "params": {"window_minutes": 600000}})
+    events = client.get("/api/alerts").json()["events"]
+    assert not any(e["type"] == "first_seen_domain" for e in events)
+
+
 def test_new_vendor_rule(client, ftl):
     """#12: complementary to new_device, but keyed on vendor rather than raw
     IP/first-seen. Only "real"/"idstore" schemas carry vendor data at all

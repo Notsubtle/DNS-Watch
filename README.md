@@ -205,8 +205,10 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   to "new devices": this one is keyed on the device's manufacturer rather than
   its raw IP — fires when a device's vendor can't be identified at all, or when
   it's the network's first-ever device from a vendor it does recognize),
-  specific domain keywords (optionally scoped to a tag too), or a **device going
-  quiet** (an active client that suddenly stops querying — offline/unplugged/
+  specific domain keywords (optionally scoped to a tag too), a **first-seen
+  domain** (the domain-keyed sibling of "new device"/"new vendor" — fires when
+  a domain is queried that no client has ever queried before, network-wide,
+  not just new to one device), or a **device going
   blocked). Rules are evaluated
   **server-side on a timer** (`ALERT_EVAL_INTERVAL_SECONDS`, default 60), so alerts fire and webhooks
   send even with no dashboard open. Fired alerts show in the Alerts panel.
@@ -379,7 +381,12 @@ Beyond the dashboard, three purpose-built views for digging into a specific ques
   arbitrary data-window-derived width bounded ranges use — a long history shows
   more, evenly-spaced bars rather than a fixed ~40-60 buckets stretched across
   the whole range. Everything else about "All" (totals, blocked/allowed counts)
-  matches the direct scan exactly.
+  matches the direct scan exactly. The same rollup infrastructure also backs the
+  **first-seen domain** alert rule: a first-ever-seen timestamp per domain,
+  network-wide, is accumulated as one more delta on the same incremental batch
+  pass — not a second cache or a live scan, which wouldn't hold up here the way
+  it does for clients (a LAN has a handful of devices; a busy network can have
+  seen hundreds of thousands of distinct domains).
 - **Optional index for very large deployments.** On the normalized schema, if your
   Pi-hole database has grown to millions of rows and *top domains* / *top clients*
   over the "All" range still feel slow, you can add two indexes to your **own**
