@@ -64,6 +64,68 @@ def test_vendor_oui_fallback_and_randomized_mac(ftl):
     assert randomized["vendor_unknown_reason"] == "randomized"
 
 
+def test_vendor_alert_candidates(ftl):
+    """#12: db.vendor_alert_candidates() backs the new_vendor alert rule.
+    Uses an exact after_ts cutoff (rather than going through the alert rule's
+    minute-granularity window) so which of build_ftl's standard clients count
+    as "new" is deterministic, not dependent on its random first-seen offsets."""
+    from app import db
+
+    if ftl["schema"] not in ("real", "idstore"):
+        # No vendor table at all on this schema (#4) -- must be a no-op, not
+        # a false "every device looks unrecognized" signal from the data gap.
+        assert db.vendor_alert_candidates(0) == []
+        return
+
+    import sqlite3
+    conn = sqlite3.connect(ftl["path"])
+    cutoff = int(conn.execute("SELECT MAX(timestamp) FROM " + (
+        "query_storage" if ftl["schema"] == "idstore" else "queries"
+    )).fetchone()[0]) + 1
+
+    if ftl["schema"] == "real":
+        # Already-established vendor, but a genuinely NEW client of it --
+        # must not be flagged (this vendor already exists on the network).
+        conn.execute("INSERT INTO network (id, hwaddr, macVendor) VALUES (98,'de:ad:be:ef:00:98','TestVendor')")
+        conn.execute("INSERT INTO network_addresses (network_id, ip, lastSeen, name, nameUpdated) "
+                     "VALUES (98,'192.168.1.98',?,NULL,?)", (cutoff, cutoff))
+        conn.execute("INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                     (float(cutoff), 1, 2, "z.example.com", "192.168.1.98"))
+        # Genuinely new vendor.
+        conn.execute("INSERT INTO network (id, hwaddr, macVendor) VALUES (99,'aa:bb:cc:dd:ee:99','NewCo')")
+        conn.execute("INSERT INTO network_addresses (network_id, ip, lastSeen, name, nameUpdated) "
+                     "VALUES (99,'192.168.1.99',?,NULL,?)", (cutoff, cutoff))
+        conn.execute("INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                     (float(cutoff), 1, 2, "y.example.com", "192.168.1.99"))
+    else:
+        from conftest import _idstore_client_id, _idstore_domain_id
+        cur = conn.cursor()
+        cid_established = _idstore_client_id(cur, "192.168.1.98", None)
+        conn.execute(
+            "UPDATE network SET hwaddr='de:ad:be:ef:00:98', macVendor='TestVendor' WHERE id = "
+            "(SELECT network_id FROM network_addresses WHERE ip='192.168.1.98')"
+        )
+        did = _idstore_domain_id(cur, "z.example.com")
+        conn.execute("INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                     (cutoff, 1, 2, did, cid_established))
+
+        cid_new = _idstore_client_id(cur, "192.168.1.99", None)
+        conn.execute(
+            "UPDATE network SET hwaddr='aa:bb:cc:dd:ee:99', macVendor='NewCo' WHERE id = "
+            "(SELECT network_id FROM network_addresses WHERE ip='192.168.1.99')"
+        )
+        did2 = _idstore_domain_id(cur, "y.example.com")
+        conn.execute("INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                     (cutoff, 1, 2, did2, cid_new))
+    conn.commit()
+    conn.close()
+
+    candidates = {c["ip"]: c for c in db.vendor_alert_candidates(cutoff)}
+    assert "192.168.1.98" not in candidates, "established vendor's new client must not be flagged"
+    assert candidates["192.168.1.99"]["kind"] == "new_vendor"
+    assert candidates["192.168.1.99"]["vendor"] == "NewCo"
+
+
 def test_status_filter_is_sql_not_post_limit(ftl):
     from app import db
     # Ask for 10 blocked with a small limit: must return 10 blocked, not "10

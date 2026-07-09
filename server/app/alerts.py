@@ -33,7 +33,7 @@ STORE_PATH = os.environ.get("DNSWATCH_DB_PATH", "/data/dnswatch.db")
 # the same event.
 _eval_lock = threading.Lock()
 
-VALID_TYPES = {"volume_threshold", "new_device", "domain_keyword", "device_quiet"}
+VALID_TYPES = {"volume_threshold", "new_device", "domain_keyword", "device_quiet", "new_vendor"}
 
 # Webhook payload shapes. "generic" is DNS Watch's own JSON; "slack"/"discord"
 # emit exactly the single field each of those incoming-webhook APIs requires.
@@ -49,6 +49,7 @@ DEFAULT_COOLDOWN = {
     "new_device": 86400,
     "domain_keyword": 900,
     "device_quiet": 3600,
+    "new_vendor": 86400,
 }
 
 
@@ -489,6 +490,16 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
             _emit(pending, rule, "warning",
                   f'{count} queries matching "{keyword}" in {window_min}m (≥ {min_count})',
                   f"kw:{rule['id']}")
+
+    elif rule["type"] == "new_vendor":
+        window_min = int(p.get("window_minutes", 1440))
+        since = now - window_min * 60
+        for c in db.vendor_alert_candidates(since):
+            if c["kind"] == "unrecognized":
+                message = f"Device with unrecognized vendor joined: {c['name']} ({c['ip']})"
+            else:
+                message = f"New vendor on the network: {c['vendor']} — {c['name']} ({c['ip']})"
+            _emit(pending, rule, "info", message, f"vendor:{rule['id']}:{c['ip']}")
 
     elif rule["type"] == "device_quiet":
         # Fire when a client that was active in the *prior* window has gone
