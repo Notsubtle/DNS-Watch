@@ -210,6 +210,10 @@ The app is organised into tabs: a **Dashboard** (everything below down to
 - **Query-volume chart** — a time-series of allowed vs. blocked queries across the
   selected range, bucketed and hoverable.
 - **Query-type breakdown** — A / AAAA / HTTPS / PTR / … distribution.
+- **Slowest domains** — domains ranked by average resolution latency (Pi-hole's
+  own per-query timing), surfacing slow, uncached, or upstream-forwarded
+  lookups a per-client view can't show. Only available on Pi-hole's newer
+  on-disk layout, which is the only one that records per-query timing at all.
 - **CSV export** — download the current filtered query view.
 - **Pagination** — the query log is paged with an exact total ("201–400 of 5,000").
 - **Alert rules** — watch for query-volume spikes (per-client, per-**tag**, or

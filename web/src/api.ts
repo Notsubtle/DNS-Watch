@@ -120,6 +120,16 @@ export interface FanoutEntry {
   clients: FanoutClient[];
 }
 
+// Domains ranked by average resolution latency (#47) -- Pi-hole's own
+// reply_time, surfacing slow/uncached/upstream-forwarded lookups. Empty on
+// schemas without a reply_time column at all (see db.slowest_domains).
+export interface QueryLatencyEntry {
+  domain: string;
+  avg_reply_ms: number;
+  max_reply_ms: number;
+  query_count: number;
+}
+
 export type RuleType =
   | "volume_threshold"
   | "new_device"
@@ -389,6 +399,9 @@ export const api = {
     getJson<FanoutEntry[]>(
       `/api/domain-fanout${qs({ range, bucket_minutes: bucketMinutes, min_clients: minClients })}`
     ),
+
+  queryLatency: (range: string) =>
+    getJson<QueryLatencyEntry[]>(`/api/query-latency${qs({ range })}`),
 
   clientHeatmap: (ip: string, days = 7) =>
     getJson<HeatmapResult>(
