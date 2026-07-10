@@ -739,6 +739,39 @@ def _insert_at(ftl, ip: str, domain: str, ts: float) -> None:
     conn.close()
 
 
+def _insert_typed(ftl, ip: str, domain: str, type_code: int, ts: float) -> None:
+    """A query from an EXISTING CLIENTS ip with a controllable FTL query
+    TYPE code (1=A, 7=TXT, 3=ANY -- see db.TYPE_NAMES), for #55's
+    query-type-composition tests."""
+    import sqlite3
+    from conftest import CLIENTS, _idstore_client_id, _idstore_domain_id
+
+    conn = sqlite3.connect(ftl["path"])
+    if ftl["schema"] == "new":
+        cid = next(i for i, (cip, _) in enumerate(CLIENTS, 1) if cip == ip)
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,?)",
+            (int(ts), type_code, 2, domain, cid),
+        )
+    elif ftl["schema"] == "idstore":
+        cur = conn.cursor()
+        name = next(n for cip, n in CLIENTS if cip == ip)
+        cid = _idstore_client_id(cur, ip, name)
+        did = _idstore_domain_id(cur, domain)
+        conn.execute(
+            "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (int(ts), type_code, 2, did, cid),
+        )
+    else:
+        stored_ts = float(ts) if ftl["schema"] == "real" else int(ts)
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (stored_ts, type_code, 2, domain, ip),
+        )
+    conn.commit()
+    conn.close()
+
+
 def test_backtest_unsupported_type_rejected(client):
     r = client.post("/api/alert-rules/backtest", json={
         "type": "new_device", "params": {"window_minutes": 60}, "days": 1})
@@ -841,3 +874,88 @@ def test_api_backtest_shape(client, ftl):
     body = r.json()
     assert set(body) == {"would_have_fired", "buckets_checked", "days", "sample_messages"}
     assert body["would_have_fired"] >= 1
+def test_unusual_query_type_fires_for_new_type_with_established_history(ftl):
+    from app import db
+
+    now = int(time.time())
+    ip = "192.168.1.10"
+    # Established history (well before the 60m window): only ever type A.
+    for i in range(5):
+        _insert_typed(ftl, ip, "steady.example.com", 1, now - 3 * 3600 - i)
+    # Within the recent window: a brand-new type for this client, TXT.
+    _insert_typed(ftl, ip, "tunnel.example.test", 7, now - 60)
+
+    hits = db.unusual_query_types(window_minutes=60)
+    hit = next((h for h in hits if h["ip"] == ip), None)
+    assert hit is not None
+    assert "TXT" in hit["new_types"]
+
+
+def test_unusual_query_type_skips_client_with_no_established_history(ftl):
+    """A client with NO queries at all before the window is skipped --
+    every type would look 'new' for a brand-new device, which would just
+    duplicate new_device/new_vendor without adding a genuine signal."""
+    from app import db
+
+    now = int(time.time())
+    ip = "192.168.1.13"  # a standard CLIENTS ip -- may have build_ftl fixture
+    # rows, but we only assert on a completely fresh ip with zero rows ever.
+    fresh_ip = "192.168.1.250"
+    _insert_typed(ftl, ip, "placeholder.example.com", 1, now - 3 * 3600)  # unused, keeps ip in scope
+
+    # fresh_ip isn't in CLIENTS, so use the idstore/new/real-aware new-client
+    # helper instead of _insert_typed (which assumes an existing CLIENTS ip).
+    _insert_new_client_query(ftl, fresh_ip, "brand-new-gadget", "first-query.example.test", now - 60)
+
+    hits = db.unusual_query_types(window_minutes=60)
+    assert not any(h["ip"] == fresh_ip for h in hits)
+
+
+def _clear_client_queries(ftl, ip: str) -> None:
+    """Wipe every query build_ftl's own randomized fixture already gave this
+    ip, so a test asserting an ABSENCE (no new type) isn't contaminated by
+    the fixture's random type choices among build_ftl's own TYPES list."""
+    import sqlite3
+
+    conn = sqlite3.connect(ftl["path"])
+    if ftl["schema"] == "new":
+        row = conn.execute("SELECT id FROM client WHERE ip = ?", (ip,)).fetchone()
+        if row:
+            conn.execute("DELETE FROM queries WHERE client_id = ?", (row[0],))
+    elif ftl["schema"] == "idstore":
+        cur = conn.cursor()
+        row = cur.execute("SELECT id FROM client_by_id WHERE ip = ?", (ip,)).fetchone()
+        if row:
+            conn.execute("DELETE FROM query_storage WHERE client = ?", (row[0],))
+    else:
+        conn.execute("DELETE FROM queries WHERE client = ?", (ip,))
+    conn.commit()
+    conn.close()
+
+
+def test_unusual_query_type_no_new_type_not_flagged(ftl):
+    from app import db
+
+    now = int(time.time())
+    ip = "192.168.1.11"
+    _clear_client_queries(ftl, ip)
+    for i in range(5):
+        _insert_typed(ftl, ip, "steady.example.com", 1, now - 3 * 3600 - i)
+    _insert_typed(ftl, ip, "steady.example.com", 1, now - 60)  # same type, recent
+
+    hits = db.unusual_query_types(window_minutes=60)
+    assert not any(h["ip"] == ip for h in hits)
+
+
+def test_unusual_query_type_alert_rule_fires(client, ftl):
+    ip = "192.168.1.12"
+    now = int(time.time())
+    for i in range(5):
+        _insert_typed(ftl, ip, "steady.example.com", 1, now - 3 * 3600 - i)
+    _insert_typed(ftl, ip, "tunnel.example.test", 7, now - 60)
+
+    client.post("/api/alert-rules", json={
+        "name": "QType", "type": "unusual_query_type", "params": {"window_minutes": 60}})
+    events = client.get("/api/alerts").json()["events"]
+    hits = [e for e in events if e["type"] == "unusual_query_type"]
+    assert any(e["client_ip"] == ip for e in hits)

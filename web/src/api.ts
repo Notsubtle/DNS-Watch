@@ -146,7 +146,8 @@ export type RuleType =
   | "doh_provider"
   | "digest"
   | "first_seen_domain"
-  | "correlated_new_device_domain";
+  | "correlated_new_device_domain"
+  | "unusual_query_type";
 
 export interface AlertRule {
   id: number;

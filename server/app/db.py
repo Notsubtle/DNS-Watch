@@ -2175,6 +2175,42 @@ def domain_queriers(domain: str, since: int, until: int) -> list[str]:
     return sorted(r["ip"] for r in rows if r["ip"] is not None)
 
 
+def unusual_query_types(window_minutes: int) -> list[dict]:
+    """Clients using a DNS query type in the last `window_minutes` that they
+    have never used in ANY of their prior history -- a shift in query-type
+    COMPOSITION, not volume (#55). A classic tunneling/exfil signature
+    (e.g. a device that's only ever done A/AAAA suddenly doing TXT/ANY
+    lookups) that volume_threshold can't see, since it counts queries, not
+    what kind they are.
+
+    A client with NO history before the window is skipped entirely -- a
+    brand-new device's first-ever queries are definitionally "new query
+    types it's never used before" for every type it happens to use, which
+    would make this fire constantly for new_device and add nothing
+    new_device/new_vendor don't already cover.
+
+    Each entry: {"ip", "name", "new_types": [...]} -- new_types is the
+    resolved type names (e.g. "TXT", "ANY"), sorted for a stable message.
+    """
+    now = int(time.time())
+    cutoff = now - window_minutes * 60
+    out = []
+    for c in client_counts(cutoff, now):
+        ip = c["ip"]
+        established = {t["type_code"] for t in query_types(ip, None, cutoff)}
+        if not established:
+            continue
+        recent = {t["type_code"] for t in query_types(ip, cutoff, now)}
+        new_type_codes = recent - established
+        if new_type_codes:
+            out.append({
+                "ip": ip,
+                "name": c["name"],
+                "new_types": sorted(type_name(tc) for tc in new_type_codes),
+            })
+    return out
+
+
 TOP_DOMAINS_LIMIT = 50  # how many matched domains the breakdown returns
 
 # Caps the AGGREGATE wall-clock cost of one simulate_pattern() call, independent
