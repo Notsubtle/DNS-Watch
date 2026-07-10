@@ -1996,6 +1996,70 @@ def _domain_fanout_id(
         return out[:limit]
 
 
+def slowest_domains(
+    since: int | None, until: int | None, min_count: int = 5, limit: int = 15
+) -> list[dict]:
+    """Domains ranked by average resolution latency (Pi-hole's own
+    `reply_time`, recorded in seconds) over the range -- surfaces slow,
+    uncached, or upstream-forwarded lookups a per-client view can't show on
+    its own (#47).
+
+    Only meaningful on Pi-hole's normalized (has_id_storage) on-disk layout
+    -- `reply_time` doesn't exist on the older client-table/plain-TEXT
+    `queries` layouts at all, so this returns [] entirely rather than
+    erroring on those, the same honest-scope precedent has_vendor_data
+    already established elsewhere in this file. (`dnssec`/`ede` are also
+    normalized-only columns, but were deliberately NOT turned into an alert
+    rule here: checked against the real UAT snapshot and `dnssec` is 0 for
+    every one of its 1.1M rows -- DNSSEC validation is opt-in in Pi-hole and
+    off by default, so a "DNSSEC failure" rule would be dead code for most
+    real deployments. `ede` had only 53 non-"-1" rows in that same snapshot,
+    both resolver-side network-error codes rather than anything actionable
+    as a security signal -- not enough real support to justify a rule.)
+
+    `min_count` guards against a single one-off slow lookup dominating the
+    ranking: a domain queried once at 2s "looks slow" but isn't a pattern
+    the way a domain that's consistently slow across many queries is.
+    """
+    if not detect_schema().has_id_storage:
+        return []
+    where = ["reply_time IS NOT NULL"]
+    params: list = []
+    if since:
+        where.append("timestamp >= ?")
+        params.append(since)
+    if until:
+        where.append("timestamp <= ?")
+        params.append(until)
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT domain AS did, AVG(reply_time) AS avg_reply,
+                   MAX(reply_time) AS max_reply, COUNT(*) AS query_count
+            FROM query_storage
+            WHERE {" AND ".join(where)}
+            GROUP BY domain
+            HAVING COUNT(*) >= ?
+            ORDER BY avg_reply DESC
+            LIMIT ?
+            """,
+            [*params, min_count, limit],
+        ).fetchall()
+        dmap = _domain_text_map(conn)
+    out = []
+    for r in rows:
+        domain = _resolve_domain_value(r["did"], dmap)
+        if domain is None:  # orphaned id -- no real domain to attribute this to
+            continue
+        out.append({
+            "domain": domain,
+            "avg_reply_ms": round(r["avg_reply"] * 1000, 1),
+            "max_reply_ms": round(r["max_reply"] * 1000, 1),
+            "query_count": r["query_count"],
+        })
+    return out
+
+
 TOP_DOMAINS_LIMIT = 50  # how many matched domains the breakdown returns
 
 # Caps the AGGREGATE wall-clock cost of one simulate_pattern() call, independent
