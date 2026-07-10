@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+from conftest import add_client_with_hourly_pattern
+
 # `webhook` fixture lives in conftest.py (shared with test_webhook_security.py).
 
 
@@ -397,6 +399,37 @@ def test_digest_message_mentions_period_and_summarizes_activity(client, store):
     msg = digest_events[0]["message"].lower()
     assert "weekly digest" in msg
     assert "device" in msg or "alert" in msg
+
+
+def test_digest_message_mentions_current_anomalies(ftl, store, monkeypatch):
+    from app import alerts
+
+    now = int(time.time())
+    pattern = [15] * 27 + [0, 0, 0]
+    add_client_with_hourly_pattern(
+        ftl["path"], ftl["schema"], "10.0.0.57", "digest_silent", pattern, now
+    )
+    monkeypatch.setattr(alerts.time, "time", lambda: now)
+
+    alerts.create_rule("Digest", "digest", {"period": "daily"})
+    digest = next(e for e in alerts.evaluate() if e["type"] == "digest")
+
+    msg = digest["message"].lower()
+    assert "daily digest" in msg
+    assert "1 anomaly(ies)" in msg
+    assert "1 silent" in msg
+
+
+def test_digest_message_omits_anomaly_clause_when_none(ftl, store, monkeypatch):
+    from app import alerts
+
+    now = int(time.time())
+    monkeypatch.setattr(alerts.time, "time", lambda: now)
+
+    alerts.create_rule("Digest", "digest", {"period": "daily"})
+    digest = next(e for e in alerts.evaluate() if e["type"] == "digest")
+
+    assert "anomal" not in digest["message"].lower()
 
 
 def test_settings_roundtrip_and_format_validation(client):

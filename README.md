@@ -265,11 +265,11 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   about to route some DNS around Pi-hole"), not a bypass detector.
 - **Digest alerts** — an optional daily or weekly rollup ("here's what happened"),
   instead of every rule firing its own webhook the moment it trips. Summarizes
-  alert events fired and new devices seen since the last digest, delivered
-  through the same webhook path as every other rule. Firing is gated on an
-  actual UTC calendar boundary (once per day / once per ISO week) rather than
-  an elapsed-time cooldown, so it can't drift early or late depending on
-  exactly when the eval timer happens to tick.
+  alert events fired, new devices seen since the last digest, and current
+  anomalies, delivered through the same webhook path as every other rule.
+  Firing is gated on an actual UTC calendar boundary (once per day / once per
+  ISO week) rather than an elapsed-time cooldown, so it can't drift early or
+  late depending on exactly when the eval timer happens to tick.
 - **Webhook delivery (optional)** — toggle it on in **⚙ Settings** and paste a URL
   to have fired alerts POSTed out (with a "Send test" button to verify). Pick a
   **format** — *Generic JSON* (ntfy / Home Assistant / custom, summary in
