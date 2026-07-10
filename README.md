@@ -226,7 +226,10 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   send even with no dashboard open. Fired alerts show in the Alerts panel, each
   with a **snooze** control (1h/24h/7d) to silence just that specific
   recurrence — e.g. one device's new-vendor alert — without disabling the rule
-  for every other client or domain it also watches.
+  for every other client or domain it also watches. An alert about a specific
+  device or domain is also a **deep-link** — click it to jump straight to
+  that client's detail view or that domain's drill-down, instead of
+  re-finding it yourself.
   Rules and events are stored in DNS Watch's **own** writable SQLite database
   (`DNSWATCH_DB_PATH`, default `/data/dnswatch.db`, mounted as the `dnswatch-data`
   volume) — Pi-hole's database is still only ever opened read-only.
