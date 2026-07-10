@@ -934,6 +934,86 @@ def _top_domains_id(client: str | list[str] | None, since: int | None, limit: in
     return out[:limit]
 
 
+def top_blocked_per_client(
+    client: str | list[str] | None, since: int | None, limit: int = 15
+) -> list[dict]:
+    """Rank blocked (client, domain) pairs in the current dashboard scope."""
+    if detect_schema().has_id_storage:
+        return _top_blocked_per_client_id(client, since, limit)
+
+    select, join = _client_join_sql()
+    where_sql, params = _build_where(client=client, status="blocked", since=since)
+    sql = f"""
+        SELECT {select}, q.domain, COUNT(*) AS n
+        FROM queries q
+        {join}
+        WHERE {where_sql}
+        GROUP BY {_client_ip_col()}, q.domain
+        ORDER BY n DESC
+        LIMIT ?
+    """
+    with _connect() as conn:
+        rows = conn.execute(sql, [*params, limit]).fetchall()
+    return [
+        {
+            "client_ip": r["client_ip"],
+            "client_name": r["client_name"],
+            "domain": r["domain"],
+            "blocked_count": r["n"],
+        }
+        for r in rows
+    ]
+
+
+def _top_blocked_per_client_id(
+    client: str | list[str] | None, since: int | None, limit: int
+) -> list[dict]:
+    """Fast path for normalized storage.
+
+    Grouping starts on raw ids to avoid the queries view's per-row subqueries,
+    then merges by resolved (client_ip, domain). The merge must happen before
+    LIMIT because client ids are not unique by ip, and orphaned integer domain
+    ids all resolve to the view's single NULL domain group.
+    """
+    with _connect() as conn:
+        client_ids = _client_ids_for_client_filter(conn, client)
+        where_sql, params = _id_where(client_ids=client_ids, since=since, status="blocked")
+        rows = conn.execute(
+            f"""
+            SELECT q.client AS cid,
+                   CASE typeof(q.domain)
+                       WHEN 'integer' THEN d.domain
+                       ELSE q.domain
+                   END AS domain,
+                   COUNT(*) AS n
+            FROM query_storage q
+            LEFT JOIN domain_by_id d ON d.id = q.domain
+            WHERE {where_sql}
+            GROUP BY q.client, q.domain
+            """,
+            params,
+        ).fetchall()
+        ipmap = _client_ip_map(conn)
+        namemap = _client_name_map(conn)
+
+    merged: dict[tuple[str | None, str | None], int] = {}
+    for r in rows:
+        ip = _resolve_client_value(r["cid"], ipmap)
+        key = (ip, r["domain"])
+        merged[key] = merged.get(key, 0) + r["n"]
+
+    ordered = sorted(merged.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    return [
+        {
+            "client_ip": ip,
+            "client_name": namemap.get(ip),
+            "domain": domain,
+            "blocked_count": n,
+        }
+        for (ip, domain), n in ordered
+    ]
+
+
 def top_clients(since: int | None, limit: int = 15) -> list[dict]:
     # Unbounded whole-db client ranking is precomputed in client_totals.
     if since is None:

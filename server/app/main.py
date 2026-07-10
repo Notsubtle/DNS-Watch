@@ -397,6 +397,16 @@ def api_top_domains(
     return db.top_domains(who, effective_since, limit)
 
 
+@app.get("/api/top-blocked-per-client")
+def api_top_blocked_per_client(
+    client: str | None = None, tag: str | None = None, vendor: str | None = None,
+    range: str | None = "1h", since: int | None = None, limit: int = 15,
+):
+    who = _resolve_client_filter(client, tag, vendor)
+    effective_since = _since_from_range(range, since)
+    return db.top_blocked_per_client(who, effective_since, limit)
+
+
 @app.get("/api/top-clients")
 def api_top_clients(range: str | None = "1h", limit: int = 15):
     effective_since = _since_from_range(range, None)
