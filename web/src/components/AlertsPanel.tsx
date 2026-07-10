@@ -22,9 +22,21 @@ const SNOOZE_OPTIONS = [
 interface Props {
   events: AlertEvent[];
   onManageRules: () => void;
+  // Deep-link a fired event's structured target (#43) into the existing
+  // client-detail/drill-down modals App.tsx already wires up for
+  // ClientList/TopList -- reusing those rather than re-scoping the whole
+  // dashboard filter, since "tell me about THIS alert's client/domain" is a
+  // more direct answer than "now re-filter everything to it".
+  onSelectClient: (ip: string) => void;
+  onSelectDomain: (domain: string) => void;
 }
 
-export default function AlertsPanel({ events, onManageRules }: Props) {
+export default function AlertsPanel({
+  events,
+  onManageRules,
+  onSelectClient,
+  onSelectDomain,
+}: Props) {
   // Tracks snoozes applied THIS session, keyed by dedup_key so every event
   // sharing that recurrence (not just the one clicked) reflects it -- purely
   // local optimism; the backend is the actual source of truth on the next
@@ -66,7 +78,25 @@ export default function AlertsPanel({ events, onManageRules }: Props) {
             return (
               <li key={e.id} className={`alert-item ${e.severity}`}>
                 <span className={`alert-dot ${e.severity}`} />
-                <span className="alert-msg">{e.message}</span>
+                {e.client_ip ? (
+                  <button
+                    className="alert-msg alert-msg-link"
+                    title={`Open ${e.client_ip}'s client detail`}
+                    onClick={() => onSelectClient(e.client_ip!)}
+                  >
+                    {e.message}
+                  </button>
+                ) : e.domain ? (
+                  <button
+                    className="alert-msg alert-msg-link"
+                    title={`Open the drill-down for ${e.domain}`}
+                    onClick={() => onSelectDomain(e.domain!)}
+                  >
+                    {e.message}
+                  </button>
+                ) : (
+                  <span className="alert-msg">{e.message}</span>
+                )}
                 <span className="alert-meta">
                   {e.rule_name} · {relTime(e.created_at)}
                 </span>
