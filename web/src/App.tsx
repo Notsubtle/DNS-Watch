@@ -6,6 +6,7 @@ import {
   ClientActivity,
   ClientInfo,
   Filters,
+  QueryLatencyEntry,
   QueryRow,
   QueryTypeEntry,
   Summary,
@@ -18,6 +19,7 @@ import FilterBar from "./components/FilterBar";
 import SummaryCards from "./components/SummaryCards";
 import QueryTable from "./components/QueryTable";
 import TopList from "./components/TopList";
+import QueryLatencyPanel from "./components/QueryLatencyPanel";
 import ClientList from "./components/ClientList";
 import TimeSeriesChart from "./components/TimeSeriesChart";
 import QueryTypeBreakdown from "./components/QueryTypeBreakdown";
@@ -83,6 +85,7 @@ export default function App() {
   const [topClients, setTopClients] = useState<ClientActivity[]>([]);
   const [series, setSeries] = useState<Timeseries | null>(null);
   const [queryTypes, setQueryTypes] = useState<QueryTypeEntry[]>([]);
+  const [latency, setLatency] = useState<QueryLatencyEntry[]>([]);
   const [alertEvents, setAlertEvents] = useState<AlertEvent[]>([]);
   const [anomalies, setAnomalies] = useState<Anomaly[]>([]);
   const [drilldown, setDrilldown] = useState<string | null>(null);
@@ -146,7 +149,7 @@ export default function App() {
     const off = offsetRef.current;
     if (showLoading) setLoading(true);
     try {
-      const [q, s, td, tc, ts, qt, al] = await Promise.all([
+      const [q, s, td, tc, ts, qt, al, ql] = await Promise.all([
         api.queries(f, PAGE_SIZE, off),
         api.summary(f),
         api.topDomains(f),
@@ -154,6 +157,7 @@ export default function App() {
         api.timeseries(f),
         api.queryTypes(f),
         api.alerts(),
+        api.queryLatency(f.range),
       ]);
       setRows(q.rows);
       setTotal(q.total);
@@ -163,6 +167,7 @@ export default function App() {
       setSeries(ts);
       setQueryTypes(qt);
       setAlertEvents(al.events);
+      setLatency(ql);
       setError(null);
     } catch (e) {
       setError(
@@ -327,6 +332,7 @@ export default function App() {
               <TopList title="Top domains" entries={topDomains} onSelect={setDrilldown} />
               <ClientList clients={topClients} onSelect={setClientDetail} />
               <QueryTypeBreakdown entries={queryTypes} />
+              <QueryLatencyPanel entries={latency} />
             </div>
           </div>
 

@@ -418,6 +418,21 @@ def api_domain_fanout(
     return db.domain_fanout(effective_since, None, bucket_minutes, min_clients, limit)
 
 
+@app.get("/api/query-latency")
+def api_query_latency(
+    range: str | None = "1h",
+    since: int | None = None,
+    min_count: int = Query(5, ge=1),
+    limit: int = Query(15, ge=1, le=50),
+):
+    """Domains ranked by average resolution latency over the window (#47) --
+    see db.slowest_domains for the has_id_storage gating (returns [] on
+    schemas that don't carry Pi-hole's reply_time column at all) and why
+    DNSSEC/EDE were deliberately not turned into an alert rule."""
+    effective_since = _since_from_range(range, since)
+    return db.slowest_domains(effective_since, None, min_count, limit)
+
+
 @app.get("/api/anomalies")
 def api_anomalies():
     """Automatic silent/spike detection against each client's own 7-day
