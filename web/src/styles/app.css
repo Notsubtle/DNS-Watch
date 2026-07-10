@@ -1064,6 +1064,24 @@ tr:hover td {
   white-space: nowrap;
 }
 
+/* #43: a fired event with a structured client_ip/domain target renders its
+   message as this instead of a plain <span> -- same visual weight as the
+   text version, just clickable, so deep-linking doesn't make the alerts
+   list look like a button farm. */
+.alert-msg-link {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.alert-msg-link:hover {
+  text-decoration: underline dotted;
+}
+
 .alert-meta {
   color: var(--ink-faint);
   font-family: var(--font-mono);
