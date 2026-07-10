@@ -18,7 +18,7 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import alerts, db, names, resolve, rollups, tags
+from app import alerts, backup, db, names, resolve, rollups, tags
 
 # How often the server evaluates alert rules on its own, independent of any open
 # dashboard. This is what makes alerting/webhooks work headless. Set to 0 to
@@ -510,6 +510,23 @@ def api_update_settings(patch: SettingsUpdate):
 @app.post("/api/settings/test-webhook")
 def api_test_webhook(body: WebhookTest):
     return alerts.test_webhook(body.url, body.secret, body.format)
+
+
+@app.get("/api/backup")
+def api_export_backup():
+    """A portable JSON snapshot of everything the user manually curated --
+    tags, alert rules, device names, webhook settings (minus the secret,
+    which the API never exposes in plaintext) -- see backup.py's module
+    note for why alert_events isn't included and why the secret can't be."""
+    return backup.export_backup()
+
+
+@app.post("/api/backup/restore")
+def api_restore_backup(data: dict):
+    """Merge a backup's contents into the current store -- see
+    backup.restore_backup for the exact merge semantics per section
+    (never a destructive replace-all)."""
+    return backup.restore_backup(data)
 
 
 @app.get("/api/alerts")
