@@ -793,6 +793,128 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
               digest_period=period)
 
 
+# --------------------------------------------------------------------------
+# Backtest (#54) -- "how many times would this rule have fired recently",
+# so tuning a threshold doesn't mean save/wait-for-the-next-eval-tick/adjust
+# in a loop against live data, the same problem simulate_pattern already
+# solves for domain_keyword's regex half.
+#
+# Only supported for rule types whose condition decomposes into fixed-size,
+# independently-checkable time windows: volume_threshold, domain_keyword,
+# device_quiet. The other rule types (new_device, new_vendor,
+# first_seen_domain, doh_provider, correlated_new_device_domain, digest) are
+# keyed on "did X newly appear" -- a single point-in-time fact evaluated
+# against live state (new_clients()/new_domains()'s "since" cursor), not a
+# repeatable per-window condition -- there's no honest way to answer "how many
+# times would this have fired" for those without re-deriving a full synthetic
+# history of first-seen timestamps, which is a different (much bigger) job.
+# raise ValueError for those -- main.py maps it to 400.
+#
+# This is an APPROXIMATION of the real eval loop, not a byte-for-byte replay:
+# it walks non-overlapping window_minutes-sized buckets across the
+# historical range and checks each bucket's condition independently, which
+# mirrors the cooldown-driven "at most one firing per window" shape those
+# rule types already have in practice, without needing to replay
+# evaluate()'s actual tick timing or dedup-key bookkeeping.
+# --------------------------------------------------------------------------
+
+BACKTESTABLE_TYPES = {"volume_threshold", "domain_keyword", "device_quiet"}
+
+MAX_BACKTEST_BUCKETS = 2000  # caps the number of bounded queries one backtest issues
+
+
+def backtest_rule(type: str, params: dict, days: int = 7) -> dict:
+    """Simulate how many of the last `days`' worth of window_minutes-sized
+    buckets would have satisfied this rule's condition, without creating the
+    rule or touching alert_events. See module note above for exactly which
+    rule types this supports and why."""
+    if type not in BACKTESTABLE_TYPES:
+        raise ValueError(
+            f"backtest isn't supported for rule type {type!r} -- its condition "
+            "is a point-in-time 'did X newly appear' check, not a repeatable "
+            "per-window one"
+        )
+    window_min = max(1, int(params.get("window_minutes", 5)))
+    bucket_seconds = window_min * 60
+    now = int(time.time())
+    since = now - days * 86400
+    bucket_count = -(-(now - since) // bucket_seconds)  # ceil division
+    if bucket_count > MAX_BACKTEST_BUCKETS:
+        raise ValueError(
+            f"that window would scan {bucket_count} buckets (max {MAX_BACKTEST_BUCKETS}) -- "
+            "shorten the backtest period or widen window_minutes"
+        )
+
+    would_fire = 0
+    sample_messages: list[str] = []
+    bucket_start = since
+    while bucket_start < now:
+        bucket_end = min(bucket_start + bucket_seconds, now)
+        message = _backtest_bucket(type, params, bucket_start, bucket_end, window_min)
+        if message is not None:
+            would_fire += 1
+            if len(sample_messages) < 5:
+                sample_messages.append(message)
+        bucket_start = bucket_end
+
+    return {
+        "would_have_fired": would_fire,
+        "buckets_checked": bucket_count,
+        "days": days,
+        "sample_messages": sample_messages,
+    }
+
+
+def _backtest_bucket(
+    type: str, params: dict, bucket_start: int, bucket_end: int, window_min: int
+) -> str | None:
+    """One bucket's worth of the same condition check `_eval_rule` performs
+    live, bounded to [bucket_start, bucket_end) instead of "now". Returns a
+    human-readable message if the condition was met in this bucket, else
+    None -- mirrors _emit()'s message shape so a sample reads the same as a
+    real fired event would."""
+    p = params
+    if type == "volume_threshold":
+        threshold = int(p.get("threshold", 1000))
+        scope = p.get("scope", "any")
+        if scope == "per_client":
+            for c in db.client_counts(bucket_start, bucket_end):
+                if c["count"] >= threshold:
+                    return f"{c['name']} made {c['count']} queries in {window_min}m (>= {threshold})"
+            return None
+        client = _resolve_rule_client(p)
+        total = db.summary(client, bucket_start, bucket_end)["total_queries"]
+        if total >= threshold:
+            who = _describe_scope(p, client)
+            return f"{total} queries from {who} in {window_min}m (>= {threshold})"
+        return None
+
+    if type == "domain_keyword":
+        keyword = (p.get("keyword") or "").strip()
+        if not keyword:
+            return None
+        min_count = int(p.get("min_count", 1))
+        client = _resolve_rule_client(p)
+        count = db.count_queries(client, keyword, None, bucket_start, bucket_end)
+        if count >= min_count:
+            who = _describe_scope(p, client)
+            scope_suffix = "" if who == "all clients" else f" from {who}"
+            return f'{count} queries matching "{keyword}"{scope_suffix} in {window_min}m (>= {min_count})'
+        return None
+
+    if type == "device_quiet":
+        min_prior = int(p.get("min_prior", 20))
+        prior_start = bucket_start - (bucket_end - bucket_start)
+        prior = {c["ip"]: c["count"] for c in db.client_counts(prior_start, bucket_start)}
+        recent_ips = {c["ip"] for c in db.client_counts(bucket_start, bucket_end)}
+        for ip, prior_n in prior.items():
+            if prior_n >= min_prior and ip not in recent_ips:
+                return f"a device with {prior_n} prior queries went quiet in {window_min}m"
+        return None
+
+    raise AssertionError(f"unreachable -- {type!r} isn't in BACKTESTABLE_TYPES")
+
+
 def evaluate() -> list[dict]:
     """Evaluate all enabled rules; persist and return newly-fired events.
 

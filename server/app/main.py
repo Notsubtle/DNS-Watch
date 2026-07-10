@@ -602,6 +602,23 @@ def api_create_rule(rule: RuleCreate):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+class RuleBacktest(BaseModel):
+    type: str
+    params: dict = {}
+    days: int = 7
+
+
+@app.post("/api/alert-rules/backtest")
+def api_backtest_rule(body: RuleBacktest):
+    """Preview how many times a rule WOULD have fired over recent history,
+    without creating it (#54) -- see alerts.backtest_rule for exactly which
+    rule types this supports and why the rest raise a 400."""
+    try:
+        return alerts.backtest_rule(body.type, body.params, body.days)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.patch("/api/alert-rules/{rule_id}")
 def api_update_rule(rule_id: int, patch: RuleUpdate):
     updated = alerts.update_rule(

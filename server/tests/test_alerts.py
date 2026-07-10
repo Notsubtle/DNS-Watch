@@ -704,3 +704,140 @@ def test_correlated_new_device_domain_noop_before_rollup_backfilled(client, ftl)
         "params": {"window_minutes": 600000}})
     events = client.get("/api/alerts").json()["events"]
     assert not any(e["type"] == "correlated_new_device_domain" for e in events)
+
+
+def _insert_at(ftl, ip: str, domain: str, ts: float) -> None:
+    """A single query from an EXISTING CLIENTS ip at an exact timestamp --
+    for #54 backtest tests, which need controlled historical data rather
+    than build_ftl's own randomized-within-the-last-hour fixture rows."""
+    import sqlite3
+    from conftest import CLIENTS, _idstore_client_id, _idstore_domain_id
+
+    conn = sqlite3.connect(ftl["path"])
+    if ftl["schema"] == "new":
+        cid = next(i for i, (cip, _) in enumerate(CLIENTS, 1) if cip == ip)
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,?)",
+            (int(ts), 1, 2, domain, cid),
+        )
+    elif ftl["schema"] == "idstore":
+        cur = conn.cursor()
+        name = next(n for cip, n in CLIENTS if cip == ip)
+        cid = _idstore_client_id(cur, ip, name)
+        did = _idstore_domain_id(cur, domain)
+        conn.execute(
+            "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (int(ts), 1, 2, did, cid),
+        )
+    else:
+        stored_ts = float(ts) if ftl["schema"] == "real" else int(ts)
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (stored_ts, 1, 2, domain, ip),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_backtest_unsupported_type_rejected(client):
+    r = client.post("/api/alert-rules/backtest", json={
+        "type": "new_device", "params": {"window_minutes": 60}, "days": 1})
+    assert r.status_code == 400
+
+
+def test_backtest_too_many_buckets_rejected(client):
+    r = client.post("/api/alert-rules/backtest", json={
+        "type": "volume_threshold",
+        "params": {"scope": "any", "threshold": 10, "window_minutes": 1},
+        "days": 30,
+    })
+    assert r.status_code == 400
+
+
+def test_backtest_volume_threshold_any_scope(ftl):
+    from app import alerts
+
+    now = int(time.time())
+    # Clearly inside "the last 1 day", well clear of a bucket boundary.
+    burst_ts = now - 3 * 3600 - 90
+    for _ in range(12):
+        _insert_at(ftl, "192.168.1.10", "ads.example.com", burst_ts)
+
+    result = alerts.backtest_rule(
+        "volume_threshold", {"scope": "any", "threshold": 10, "window_minutes": 60}, days=1
+    )
+    assert result["would_have_fired"] >= 1
+    assert any("queries from" in m for m in result["sample_messages"])
+
+
+def test_backtest_volume_threshold_per_client(ftl):
+    from app import alerts
+
+    now = int(time.time())
+    burst_ts = now - 3 * 3600 - 90
+    for _ in range(12):
+        _insert_at(ftl, "192.168.1.11", "ads.example.com", burst_ts)
+
+    result = alerts.backtest_rule(
+        "volume_threshold", {"scope": "per_client", "threshold": 10, "window_minutes": 60}, days=1
+    )
+    assert result["would_have_fired"] >= 1
+
+
+def test_backtest_domain_keyword(ftl):
+    from app import alerts
+
+    now = int(time.time())
+    burst_ts = now - 3 * 3600 - 90
+    for _ in range(3):
+        _insert_at(ftl, "192.168.1.10", "tracker.bad.co", burst_ts)
+
+    result = alerts.backtest_rule(
+        "domain_keyword", {"keyword": "tracker", "min_count": 2, "window_minutes": 60}, days=1
+    )
+    assert result["would_have_fired"] >= 1
+    assert any('"tracker"' in m for m in result["sample_messages"])
+
+
+def test_backtest_device_quiet(ftl):
+    from app import alerts
+
+    now = int(time.time())
+    # Active well within a 60m bucket ~3h ago, then nothing in the following bucket.
+    active_ts = now - 3 * 3600 - 90
+    for _ in range(25):
+        _insert_at(ftl, "192.168.1.12", "cdn.site.net", active_ts)
+
+    result = alerts.backtest_rule(
+        "device_quiet", {"min_prior": 20, "window_minutes": 60}, days=1
+    )
+    assert result["would_have_fired"] >= 1
+
+
+def test_backtest_returns_zero_when_never_crossed(ftl):
+    from app import alerts
+
+    result = alerts.backtest_rule(
+        "volume_threshold",
+        {"scope": "any", "threshold": 999999, "window_minutes": 60},
+        days=1,
+    )
+    assert result["would_have_fired"] == 0
+    assert result["sample_messages"] == []
+
+
+def test_api_backtest_shape(client, ftl):
+    now = int(time.time())
+    burst_ts = now - 3 * 3600 - 90
+    for _ in range(12):
+        _insert_at(ftl, "192.168.1.10", "ads.example.com", burst_ts)
+
+    r = client.post("/api/alert-rules/backtest", json={
+        "type": "volume_threshold",
+        "params": {"scope": "any", "threshold": 10, "window_minutes": 60},
+        "days": 1,
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"would_have_fired", "buckets_checked", "days", "sample_messages"}
+    assert body["would_have_fired"] >= 1
