@@ -903,7 +903,7 @@ tr:hover td {
 
 .alert-item {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   align-items: center;
   gap: 10px;
   padding: 7px 0;
@@ -913,6 +913,24 @@ tr:hover td {
 
 .alert-item:last-child {
   border-bottom: none;
+}
+
+/* Per-event snooze control (#42) — deliberately understated (matches
+   .anomaly-ip-link's faint/mono treatment) since it's a secondary action,
+   not the point of the row. */
+.alert-snooze-select {
+  background: transparent;
+  border: 1px solid var(--ink-border);
+  border-radius: 4px;
+  color: var(--ink-faint);
+  font-size: 11px;
+  padding: 2px 4px;
+}
+
+.alert-snoozed {
+  color: var(--ink-faint);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .alert-dot {

@@ -432,3 +432,97 @@ def test_fire_delivers_webhook_in_format(client, webhook):
     assert received[-1]["body"].keys() == {"content"}       # discord shape
     assert 0 < len(received[-1]["body"]["content"]) <= 2000
     assert received[-1]["auth"] == "Bearer s3"
+
+
+def test_events_carry_structured_client_ip_and_domain(client):
+    """#43: fired events must expose a structured target (client_ip/domain),
+    not just a free-text message, so the frontend can deep-link into the
+    dashboard/heatmap without parsing dedup_key strings."""
+    client.post("/api/alert-rules", json={
+        "name": "New", "type": "new_device", "params": {"window_minutes": 600}})
+    events = client.get("/api/alerts").json()["events"]
+    new_dev = next(e for e in events if e["type"] == "new_device")
+    assert new_dev["client_ip"] is not None
+    assert new_dev["domain"] is None
+    assert new_dev["dedup_key"].startswith("new:")
+
+
+def test_snooze_suppresses_only_that_recurrence(client):
+    """#42: snoozing one client's fired new_device event must stop THAT
+    client's alert from re-firing, without affecting a different client's
+    otherwise-identical alert under the very same rule -- proves this is
+    keyed on dedup_key (per-entity), not the rule as a whole."""
+    client.post("/api/alert-rules", json={
+        "name": "New", "type": "new_device", "params": {"window_minutes": 600}})
+    events = client.get("/api/alerts").json()["events"]
+    new_devs = [e for e in events if e["type"] == "new_device"]
+    assert len(new_devs) >= 2, "fixture needs at least 2 new devices for this test"
+    snoozed_event, other_event = new_devs[0], new_devs[1]
+
+    until = int(time.time()) + 3600
+    r = client.post(f"/api/alert-events/{snoozed_event['id']}/snooze", json={"until": until})
+    assert r.status_code == 200
+    assert r.json()["dedup_key"] == snoozed_event["dedup_key"]
+
+    # Force both events past their normal cooldown so they'd otherwise both
+    # re-fire -- isolating the snooze's effect from the ordinary cooldown gate.
+    from app import alerts
+    with alerts._connect() as conn:
+        conn.execute("UPDATE alert_events SET created_at = 0")
+        conn.commit()
+
+    refired = client.get("/api/alerts").json()["events"]
+    refired_keys = {e["dedup_key"] for e in refired}
+    assert other_event["dedup_key"] in refired_keys, "the un-snoozed device's alert should still re-fire"
+    # The snoozed one may still appear from its ORIGINAL insert (list_events
+    # just reads history), so check it didn't get a NEWER created_at instead.
+    resnoozed_rows = [e for e in refired if e["dedup_key"] == snoozed_event["dedup_key"]]
+    assert all(e["created_at"] == 0 for e in resnoozed_rows), "snoozed recurrence must not re-fire"
+
+
+def test_snooze_expires(client, monkeypatch):
+    """A snooze must stop blocking re-fires once `until` has passed."""
+    from app import alerts
+
+    client.post("/api/alert-rules", json={
+        "name": "New", "type": "new_device", "params": {"window_minutes": 600}})
+    events = client.get("/api/alerts").json()["events"]
+    ev = next(e for e in events if e["type"] == "new_device")
+
+    base = int(time.time())
+    monkeypatch.setattr(alerts.time, "time", lambda: base)
+    until = base + 100
+    client.post(f"/api/alert-events/{ev['id']}/snooze", json={"until": until})
+
+    with alerts._connect() as conn:
+        conn.execute("UPDATE alert_events SET created_at = 0 WHERE dedup_key = ?", (ev["dedup_key"],))
+        conn.commit()
+
+    # Still within the snooze window -> no re-fire.
+    monkeypatch.setattr(alerts.time, "time", lambda: base + 50)
+    still_snoozed = client.get("/api/alerts").json()["events"]
+    assert all(e["created_at"] == 0 for e in still_snoozed if e["dedup_key"] == ev["dedup_key"])
+
+    # Past `until` -> free to re-fire again.
+    monkeypatch.setattr(alerts.time, "time", lambda: base + 200)
+    after_expiry = client.get("/api/alerts").json()["events"]
+    refired = [e for e in after_expiry if e["dedup_key"] == ev["dedup_key"]]
+    assert any(e["created_at"] == base + 200 for e in refired)
+
+
+def test_snooze_unknown_event_404s(client):
+    assert client.post("/api/alert-events/9999/snooze", json={"until": 0}).status_code == 404
+
+
+def test_unsnooze(client):
+    client.post("/api/alert-rules", json={
+        "name": "New", "type": "new_device", "params": {"window_minutes": 600}})
+    ev = next(e for e in client.get("/api/alerts").json()["events"] if e["type"] == "new_device")
+    until = int(time.time()) + 3600
+    client.post(f"/api/alert-events/{ev['id']}/snooze", json={"until": until})
+
+    r = client.delete(f"/api/alert-snoozes/{ev['dedup_key']}")
+    assert r.status_code == 200
+
+    # A second unsnooze of the same (now-removed) key 404s.
+    assert client.delete(f"/api/alert-snoozes/{ev['dedup_key']}").status_code == 404
