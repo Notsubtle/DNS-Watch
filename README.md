@@ -220,8 +220,12 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   specific domain keywords (optionally scoped to a tag too), a **first-seen
   domain** (the domain-keyed sibling of "new device"/"new vendor" — fires when
   a domain is queried that no client has ever queried before, network-wide,
-  not just new to one device), or a **device going quiet** (offline or
-  tampered with). Rules are evaluated
+  not just new to one device), a **device going quiet** (offline or
+  tampered with), or a **new device querying a first-seen domain**
+  together — a compound rule that fires only when BOTH are true within
+  minutes of each other (e.g. a freshly-plugged-in gadget immediately
+  phoning an unrecognized domain), a stronger signal than either "new
+  device" or "first-seen domain" alone. Rules are evaluated
   **server-side on a timer** (`ALERT_EVAL_INTERVAL_SECONDS`, default 60), so alerts fire and webhooks
   send even with no dashboard open. Fired alerts show in the Alerts panel, each
   with a **snooze** control (1h/24h/7d) to silence just that specific
