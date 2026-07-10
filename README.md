@@ -207,6 +207,8 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   devices first seen in the last 24h. Click a top domain to open a **drill-down**
   showing which clients queried it, or click a **client** to open its full
   **detail view** (its own volume chart, top domains, query types, first/last seen).
+- **Top blocked per client** — a ranked dashboard-wide view of which blocked
+  domains are hitting which clients most often, scoped by the same filters.
 - **Query-volume chart** — a time-series of allowed vs. blocked queries across the
   selected range, bucketed and hoverable.
 - **Query-type breakdown** — A / AAAA / HTTPS / PTR / … distribution.

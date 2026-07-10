@@ -49,6 +49,13 @@ export interface TopEntry {
   count: number;
 }
 
+export interface TopBlockedPerClientEntry {
+  client_ip: string | null;
+  client_name: string | null;
+  domain: string | null;
+  blocked_count: number;
+}
+
 export interface ClientActivity {
   ip: string;
   name: string;
@@ -353,6 +360,16 @@ export const api = {
   topDomains: (f: Pick<Filters, "client" | "tag" | "vendor" | "range">) =>
     getJson<TopEntry[]>(
       `/api/top-domains${qs({ client: f.client, tag: f.tag, vendor: f.vendor, range: f.range })}`
+    ),
+
+  topBlockedPerClient: (f: Pick<Filters, "client" | "tag" | "vendor" | "range">) =>
+    getJson<TopBlockedPerClientEntry[]>(
+      `/api/top-blocked-per-client${qs({
+        client: f.client,
+        tag: f.tag,
+        vendor: f.vendor,
+        range: f.range,
+      })}`
     ),
 
   topClients: (f: Pick<Filters, "range">) =>

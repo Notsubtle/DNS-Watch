@@ -11,6 +11,7 @@ import {
   QueryTypeEntry,
   Summary,
   Tag,
+  TopBlockedPerClientEntry,
   Timeseries,
   TopEntry,
   Vendor,
@@ -82,6 +83,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [topDomains, setTopDomains] = useState<TopEntry[]>([]);
+  const [topBlockedPerClient, setTopBlockedPerClient] = useState<TopBlockedPerClientEntry[]>([]);
   const [topClients, setTopClients] = useState<ClientActivity[]>([]);
   const [series, setSeries] = useState<Timeseries | null>(null);
   const [queryTypes, setQueryTypes] = useState<QueryTypeEntry[]>([]);
@@ -149,10 +151,11 @@ export default function App() {
     const off = offsetRef.current;
     if (showLoading) setLoading(true);
     try {
-      const [q, s, td, tc, ts, qt, al, ql] = await Promise.all([
+      const [q, s, td, tb, tc, ts, qt, al, ql] = await Promise.all([
         api.queries(f, PAGE_SIZE, off),
         api.summary(f),
         api.topDomains(f),
+        api.topBlockedPerClient(f),
         api.clientActivity(f),
         api.timeseries(f),
         api.queryTypes(f),
@@ -163,6 +166,7 @@ export default function App() {
       setTotal(q.total);
       setSummary(s);
       setTopDomains(td);
+      setTopBlockedPerClient(tb);
       setTopClients(tc);
       setSeries(ts);
       setQueryTypes(qt);
@@ -231,13 +235,32 @@ export default function App() {
   useEffect(() => {
     if (view !== "dashboard") return;
     refresh(true);
-  }, [view, filters.client, filters.tag, filters.status, filters.range, debouncedDomain, offset]);
+  }, [
+    view,
+    filters.client,
+    filters.tag,
+    filters.vendor,
+    filters.status,
+    filters.range,
+    debouncedDomain,
+    offset,
+  ]);
 
   useEffect(() => {
     if (!autoRefresh || view !== "dashboard") return;
     const id = setInterval(() => refresh(false), REFRESH_MS);
     return () => clearInterval(id);
-  }, [autoRefresh, view, filters.client, filters.tag, filters.status, filters.range, debouncedDomain, offset]);
+  }, [
+    autoRefresh,
+    view,
+    filters.client,
+    filters.tag,
+    filters.vendor,
+    filters.status,
+    filters.range,
+    debouncedDomain,
+    offset,
+  ]);
 
   // Independent, slower poll for anomalies — see ANOMALIES_REFRESH_MS above
   // for why this isn't part of the main 5s refresh. Also only runs on the
@@ -330,6 +353,16 @@ export default function App() {
             />
             <div ref={sideColRef} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               <TopList title="Top domains" entries={topDomains} onSelect={setDrilldown} />
+              <TopList
+                title="Top blocked per client"
+                entries={topBlockedPerClient}
+                getLabel={(entry) => entry.domain ?? "Unknown domain"}
+                getSubtitle={(entry) => {
+                  const client = entry.client_name || entry.client_ip || "Unknown client";
+                  return `via ${client}`;
+                }}
+                getCount={(entry) => entry.blocked_count}
+              />
               <ClientList clients={topClients} onSelect={setClientDetail} />
               <QueryTypeBreakdown entries={queryTypes} />
               <QueryLatencyPanel entries={latency} />
