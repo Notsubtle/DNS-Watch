@@ -191,11 +191,15 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   status (allowed/blocked), and timestamp. Scrolls internally within a fixed-height
   panel (newest first) instead of growing the page.
 - **Filters** — by client (dropdown of known devices, searchable by vendor — e.g.
-  type "Espressif" to narrow the list to just those devices) **or by tag**
+  type "Espressif" to narrow the list to just those devices), **by tag**
   (a user-defined group like "kids"/"IoT"/"guest" — see **🏷 Manage Tags** in the
-  header — scoping every dashboard panel to that whole group at once instead of
-  one device or every device), domain (substring search), status
-  (allowed / blocked / all), and time range (15m / 1h / 24h / 7d / custom).
+  header), or **by vendor as a dashboard-wide scope** (pick "Espressif Inc." from
+  the same filter dropdown to re-scope every panel — summary, top domains,
+  timeseries, query log — to every device from that manufacturer at once, not
+  just narrow the device list). Tag/vendor/single-device selection is mutually
+  exclusive — picking one clears the others. Also filterable by domain
+  (substring search), status (allowed / blocked / all), and time range
+  (15m / 1h / 24h / 7d / custom).
 - **Summary cards** — total queries, blocked %, unique clients, unique domains for
   the current filter/time window.
 - **Top domains / top clients** — ranked lists for the current filter window.

@@ -235,7 +235,8 @@ export interface DeviceNameRow {
 
 export interface Filters {
   client: string; // "" = all
-  tag: string; // "" = no tag filter; mutually exclusive with client (#31)
+  tag: string; // "" = no tag filter; mutually exclusive with client/vendor (#31)
+  vendor: string; // "" = no vendor filter; mutually exclusive with client/tag (#11)
   domain: string;
   status: string; // all | allowed | blocked
   range: string; // 15m | 1h | 24h | 7d
@@ -248,6 +249,14 @@ export interface Tag {
   id: number;
   name: string;
   created_at: number;
+  ips: string[];
+}
+
+// A distinct resolved vendor (#11 remaining scope) and its current member
+// IPs — read-only/derived, unlike Tag: there's nothing to create or delete,
+// it just reflects whatever clients currently resolve to that vendor.
+export interface Vendor {
+  name: string;
   ips: string[];
 }
 
@@ -295,6 +304,7 @@ export const api = {
       `/api/queries${qs({
         client: f.client,
         tag: f.tag,
+        vendor: f.vendor,
         domain: f.domain,
         status: f.status,
         range: f.range,
@@ -303,12 +313,14 @@ export const api = {
       })}`
     ),
 
-  summary: (f: Pick<Filters, "client" | "tag" | "range">) =>
-    getJson<Summary>(`/api/summary${qs({ client: f.client, tag: f.tag, range: f.range })}`),
+  summary: (f: Pick<Filters, "client" | "tag" | "vendor" | "range">) =>
+    getJson<Summary>(
+      `/api/summary${qs({ client: f.client, tag: f.tag, vendor: f.vendor, range: f.range })}`
+    ),
 
-  topDomains: (f: Pick<Filters, "client" | "tag" | "range">) =>
+  topDomains: (f: Pick<Filters, "client" | "tag" | "vendor" | "range">) =>
     getJson<TopEntry[]>(
-      `/api/top-domains${qs({ client: f.client, tag: f.tag, range: f.range })}`
+      `/api/top-domains${qs({ client: f.client, tag: f.tag, vendor: f.vendor, range: f.range })}`
     ),
 
   topClients: (f: Pick<Filters, "range">) =>
@@ -322,14 +334,20 @@ export const api = {
   clientDetail: (ip: string, range: string) =>
     getJson<ClientDetail>(`/api/client/${encodeURIComponent(ip)}${qs({ range })}`),
 
-  queryTypes: (f: Pick<Filters, "client" | "tag" | "range">) =>
+  queryTypes: (f: Pick<Filters, "client" | "tag" | "vendor" | "range">) =>
     getJson<QueryTypeEntry[]>(
-      `/api/query-types${qs({ client: f.client, tag: f.tag, range: f.range })}`
+      `/api/query-types${qs({ client: f.client, tag: f.tag, vendor: f.vendor, range: f.range })}`
     ),
 
-  timeseries: (f: Pick<Filters, "client" | "tag" | "range">, buckets = 60) =>
+  timeseries: (f: Pick<Filters, "client" | "tag" | "vendor" | "range">, buckets = 60) =>
     getJson<Timeseries>(
-      `/api/timeseries${qs({ client: f.client, tag: f.tag, range: f.range, buckets })}`
+      `/api/timeseries${qs({
+        client: f.client,
+        tag: f.tag,
+        vendor: f.vendor,
+        range: f.range,
+        buckets,
+      })}`
     ),
 
   // Returns the download URL for the current filter view (browser handles the download).
@@ -337,6 +355,7 @@ export const api = {
     `/api/queries.csv${qs({
       client: f.client,
       tag: f.tag,
+      vendor: f.vendor,
       domain: f.domain,
       status: f.status,
       range: f.range,
@@ -394,6 +413,8 @@ export const api = {
     sendJson<{ ip: string; name: string }>(`/api/device-names/${encodeURIComponent(ip)}`, "PUT", { name }),
   deleteDeviceName: (ip: string) =>
     sendJson<{ deleted: string }>(`/api/device-names/${encodeURIComponent(ip)}`, "DELETE"),
+
+  listVendors: () => getJson<Vendor[]>("/api/vendors"),
 
   listTags: () => getJson<Tag[]>("/api/tags"),
   createTag: (name: string) => sendJson<Tag>("/api/tags", "POST", { name }),

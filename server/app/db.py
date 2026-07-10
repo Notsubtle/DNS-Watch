@@ -421,6 +421,44 @@ def _vendor_fields(ip: str, vmap: dict[str, dict]) -> dict:
     )
 
 
+def list_vendors() -> list[dict]:
+    """Every distinct RESOLVED vendor string currently on record, each with
+    its member ips, for the dashboard's vendor filter (#11 remaining scope).
+
+    Deliberately scoped to clients with an actual resolved vendor name --
+    unlike a tag, "vendor" isn't a stored/nameable entity a user creates, so
+    there's no sensible group for "unknown vendor"/"private MAC" clients to
+    join here (that grouping already exists as informational text elsewhere,
+    e.g. DeviceNamesModal, not as a filterable scope). Returns [] entirely
+    when this schema carries no vendor data at all (has_vendor_data=False)."""
+    with _connect() as conn:
+        vmap = _client_vendor_map(conn)
+    by_vendor: dict[str, list[str]] = {}
+    for ip, v in vmap.items():
+        vendor = v.get("vendor")
+        if vendor:
+            by_vendor.setdefault(vendor, []).append(ip)
+    return [
+        {"name": vendor, "ips": sorted(ips)}
+        for vendor, ips in sorted(by_vendor.items())
+    ]
+
+
+def client_ips_for_vendor(vendor: str) -> list[str]:
+    """Every client ip whose resolved vendor exactly matches `vendor`, for the
+    dashboard's vendor filter/alert-rule scoping (#11 remaining scope).
+
+    Unlike tags.get_tag_ips, there's no "unknown vendor name" case to signal
+    with None -- vendor isn't a stored entity a user creates, it's a live,
+    derived grouping over whatever clients currently resolve to that string.
+    A typo'd or since-vanished vendor name simply matches no clients, the
+    same silent-empty behaviour an unrecognized single ip filter already has
+    in _build_where."""
+    with _connect() as conn:
+        vmap = _client_vendor_map(conn)
+    return sorted(ip for ip, v in vmap.items() if v.get("vendor") == vendor)
+
+
 def _domain_text_map(conn: sqlite3.Connection) -> dict[int, str]:
     """id -> domain text, from domain_by_id. domain_by_id.id is a PK and
     domain_by_id.domain is UNIQUE, so this is a bijection (see the module note

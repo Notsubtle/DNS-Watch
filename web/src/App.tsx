@@ -12,6 +12,7 @@ import {
   Tag,
   Timeseries,
   TopEntry,
+  Vendor,
 } from "./api";
 import FilterBar from "./components/FilterBar";
 import SummaryCards from "./components/SummaryCards";
@@ -64,6 +65,7 @@ export default function App() {
   const [filters, setFiltersState] = useState<Filters>({
     client: "",
     tag: "",
+    vendor: "",
     domain: "",
     status: "all",
     range: "1h",
@@ -71,6 +73,7 @@ export default function App() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [clients, setClients] = useState<ClientInfo[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
+  const [vendors, setVendors] = useState<Vendor[]>([]);
   const [rows, setRows] = useState<QueryRow[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -132,6 +135,7 @@ export default function App() {
   useEffect(() => {
     api.clients().then(setClients).catch(() => {});
     api.listTags().then(setTags).catch(() => {});
+    api.listVendors().then(setVendors).catch(() => {});
   }, []);
 
   // `showLoading` distinguishes user-initiated fetches (filter/page changes),
@@ -174,7 +178,13 @@ export default function App() {
   // (approximately) when it happened. Reuses the existing filter state
   // machinery — same as ClientList's/TopList's click-through.
   function handleAnomalySelect(a: Anomaly) {
-    setFilters({ ...filters, client: a.ip, tag: "", range: nearestPresetForAnomaly(a) });
+    setFilters({
+      ...filters,
+      client: a.ip,
+      tag: "",
+      vendor: "",
+      range: nearestPresetForAnomaly(a),
+    });
   }
 
   // Clicking the IP text specifically opens the side drawer with the raw
@@ -277,6 +287,7 @@ export default function App() {
             onChange={setFilters}
             clients={clients}
             tags={tags}
+            vendors={vendors}
             autoRefresh={autoRefresh}
             onToggleAutoRefresh={() => setAutoRefresh((v) => !v)}
             csvHref={api.csvUrl(effectiveFilters)}
