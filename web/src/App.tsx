@@ -306,7 +306,12 @@ export default function App() {
             onSelectIp={handleAnomalyIpSelect}
           />
 
-          <AlertsPanel events={alertEvents} onManageRules={() => setRulesOpen(true)} />
+          <AlertsPanel
+            events={alertEvents}
+            onManageRules={() => setRulesOpen(true)}
+            onSelectClient={setClientDetail}
+            onSelectDomain={setDrilldown}
+          />
 
           <TimeSeriesChart data={series} loading={loading} />
 
