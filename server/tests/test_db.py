@@ -338,3 +338,118 @@ def test_domain_queriers(ftl):
     result = set(db.domain_queriers(domain, now - 60, now + 60))
     assert result == set(in_window_ips)
     assert db.domain_queriers("never-queried.example.test", now - 60, now + 60) == []
+
+
+def test_read_dhcp_leases_parses_file(tmp_path, monkeypatch):
+    """#58: dnsmasq lease-file format is
+    '<expiry-epoch> <mac> <ip> <hostname-or-*> <client-id-or-*>'."""
+    import time
+    from app import db
+
+    now = int(time.time())
+    leases_path = tmp_path / "dhcp.leases"
+    leases_path.write_text(f"{now + 3600} aa:bb:cc:dd:ee:ff 192.168.1.50 my-phone *\n")
+    monkeypatch.setattr(db, "LEASES_PATH", str(leases_path))
+
+    leases = db._read_dhcp_leases()
+    assert leases["aa:bb:cc:dd:ee:ff"] == ("192.168.1.50", now + 3600)
+
+
+def test_read_dhcp_leases_missing_file_returns_empty(tmp_path, monkeypatch):
+    """Missing/absent file (Pi-hole isn't the DHCP server -- a common
+    home-network topology) must silently return {} rather than raising."""
+    from app import db
+
+    monkeypatch.setattr(db, "LEASES_PATH", str(tmp_path / "does-not-exist.leases"))
+    assert db._read_dhcp_leases() == {}
+
+
+def test_read_dhcp_leases_empty_file_returns_empty(tmp_path, monkeypatch):
+    from app import db
+
+    leases_path = tmp_path / "dhcp.leases"
+    leases_path.write_text("")
+    monkeypatch.setattr(db, "LEASES_PATH", str(leases_path))
+    assert db._read_dhcp_leases() == {}
+
+
+def test_quiet_presence_note_sharpened_by_expired_lease(ftl, tmp_path, monkeypatch):
+    """#58: when a matching (mac, ip) lease is found and expired, the
+    generic hedge is sharpened with a concrete lease-expiry note."""
+    import time
+    from conftest import CLIENTS
+    from app import db
+
+    if ftl["schema"] not in ("real", "idstore"):
+        return  # no vendor/hwaddr data on this schema -- nothing to cross-reference
+
+    ip = CLIENTS[0][0]
+    with db._connect() as conn:
+        hwaddr = db._vendor_fields(ip, db._client_vendor_map(conn))["hwaddr"]
+    assert hwaddr
+
+    now = int(time.time())
+    leases_path = tmp_path / "dhcp.leases"
+    leases_path.write_text(f"{now - 3 * 3600} {hwaddr} {ip} somehost *\n")
+    monkeypatch.setattr(db, "LEASES_PATH", str(leases_path))
+
+    note = db.quiet_presence_note(ip)
+    assert db.PRESENCE_MAC_KNOWN_NOTE in note
+    assert "lease expired 3h ago" in note
+
+
+def test_quiet_presence_note_active_lease_wording(ftl, tmp_path, monkeypatch):
+    import time
+    from conftest import CLIENTS
+    from app import db
+
+    if ftl["schema"] not in ("real", "idstore"):
+        return
+
+    ip = CLIENTS[0][0]
+    with db._connect() as conn:
+        hwaddr = db._vendor_fields(ip, db._client_vendor_map(conn))["hwaddr"]
+
+    now = int(time.time())
+    leases_path = tmp_path / "dhcp.leases"
+    leases_path.write_text(f"{now + 3600} {hwaddr} {ip} somehost *\n")
+    monkeypatch.setattr(db, "LEASES_PATH", str(leases_path))
+
+    note = db.quiet_presence_note(ip)
+    assert "still active" in note
+
+
+def test_quiet_presence_note_unchanged_without_lease_file(ftl, tmp_path, monkeypatch):
+    """No dhcp.leases file at all (the common case) -- the note must be
+    EXACTLY the existing generic hedge, unchanged."""
+    from conftest import CLIENTS
+    from app import db
+
+    ip = CLIENTS[0][0]
+    monkeypatch.setattr(db, "LEASES_PATH", str(tmp_path / "does-not-exist.leases"))
+    note = db.quiet_presence_note(ip)
+    assert note in (db.PRESENCE_MAC_KNOWN_NOTE, db.PRESENCE_MAC_UNKNOWN_NOTE)
+
+
+def test_quiet_presence_note_lease_for_different_ip_ignored(ftl, tmp_path, monkeypatch):
+    """A lease record for this mac but pointing at a DIFFERENT ip must not
+    be treated as a presence signal for the ip actually being asked about
+    -- the mac has moved, or DHCP reassigned this ip to someone else."""
+    import time
+    from conftest import CLIENTS
+    from app import db
+
+    if ftl["schema"] not in ("real", "idstore"):
+        return
+
+    ip = CLIENTS[0][0]
+    with db._connect() as conn:
+        hwaddr = db._vendor_fields(ip, db._client_vendor_map(conn))["hwaddr"]
+
+    now = int(time.time())
+    leases_path = tmp_path / "dhcp.leases"
+    leases_path.write_text(f"{now - 3600} {hwaddr} 10.0.0.99 somehost *\n")
+    monkeypatch.setattr(db, "LEASES_PATH", str(leases_path))
+
+    note = db.quiet_presence_note(ip)
+    assert "lease" not in note

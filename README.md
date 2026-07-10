@@ -76,7 +76,12 @@ a different DNS resolver (DoH, VPN, hardcoded upstream)"; if Pi-hole never captu
 one (a value Pi-hole itself represents as an `ip-<address>` placeholder — common for
 cross-subnet/VLAN traffic, an expired DHCP lease record, or a gap after a Pi-hole
 restart), the note says presence simply can't be determined, rather than guessing
-either way.
+either way. If Pi-hole is also your network's DHCP server, this note gets one
+more (still passive — never actively probed) data point: whether that device's
+current DHCP lease has expired or is still active, read straight from Pi-hole's
+own lease file already sitting in the same folder this app already mounts
+read-only. Silently omitted, with no change in behavior, if Pi-hole isn't your
+DHCP server — a common setup where your router handles DHCP instead.
 
 ## Why DNS Watch, when Pi-hole already has a dashboard?
 
