@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { api, WebhookFormat } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { api, BackupRestoreSummary, WebhookFormat } from "../api";
 
 interface Props {
   onClose: () => void;
@@ -28,6 +28,12 @@ export default function SettingsModal({ onClose }: Props) {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; error: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Config backup/export (#45).
+  const [restoring, setRestoring] = useState(false);
+  const [restoreSummary, setRestoreSummary] = useState<BackupRestoreSummary | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     api
@@ -93,6 +99,24 @@ export default function SettingsModal({ onClose }: Props) {
       setTestResult({ ok: false, error: (e as Error).message });
     } finally {
       setTesting(false);
+    }
+  }
+
+  async function handleRestoreFile(file: File) {
+    setRestoring(true);
+    setRestoreError(null);
+    setRestoreSummary(null);
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      setRestoreSummary(await api.restoreBackup(data));
+    } catch (e) {
+      setRestoreError(
+        e instanceof SyntaxError ? "That file isn't valid JSON." : (e as Error).message
+      );
+    } finally {
+      setRestoring(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
 
@@ -195,6 +219,45 @@ export default function SettingsModal({ onClose }: Props) {
                 {testResult.ok
                   ? "Test delivered successfully."
                   : `Test failed: ${testResult.error ?? "unknown error"}`}
+              </div>
+            )}
+
+            <h3 className="modal-section">Backup &amp; restore</h3>
+            <p className="settings-hint">
+              A portable snapshot of your tags, alert rules, and device names (webhook settings
+              too, minus the secret — that's never sent to the browser, so re-enter it by hand
+              after restoring onto a fresh install). Restoring <strong>merges</strong> into
+              whatever's already here rather than replacing it — existing tags/rules/names are
+              left alone; nothing is deleted.
+            </p>
+            <div className="settings-actions">
+              <a className="btn-small" href={api.backupUrl} download="dnswatch-backup.json">
+                Download backup
+              </a>
+              <button
+                className="btn-small"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={restoring}
+              >
+                {restoring ? "Restoring…" : "Restore from file…"}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/json"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) handleRestoreFile(file);
+                }}
+              />
+            </div>
+            {restoreError && <div className="error-banner">{restoreError}</div>}
+            {restoreSummary && (
+              <div className="settings-test ok">
+                Restored {restoreSummary.tags} tag(s), {restoreSummary.alert_rules} rule(s),{" "}
+                {restoreSummary.device_names} device name(s)
+                {restoreSummary.settings_restored ? ", and webhook settings" : ""}.
               </div>
             )}
           </div>

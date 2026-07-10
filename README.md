@@ -212,6 +212,10 @@ The app is organised into tabs: a **Dashboard** (everything below down to
 - **Query-volume chart** — a time-series of allowed vs. blocked queries across the
   selected range, bucketed and hoverable.
 - **Query-type breakdown** — A / AAAA / HTTPS / PTR / … distribution.
+- **Slowest domains** — domains ranked by average resolution latency (Pi-hole's
+  own per-query timing), surfacing slow, uncached, or upstream-forwarded
+  lookups a per-client view can't show. Only available on Pi-hole's newer
+  on-disk layout, which is the only one that records per-query timing at all.
 - **CSV export** — download the current filtered query view.
 - **Pagination** — the query log is paged with an exact total ("201–400 of 5,000").
 - **Alert rules** — watch for query-volume spikes (per-client, per-**tag**, or
@@ -222,8 +226,12 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   specific domain keywords (optionally scoped to a tag too), a **first-seen
   domain** (the domain-keyed sibling of "new device"/"new vendor" — fires when
   a domain is queried that no client has ever queried before, network-wide,
-  not just new to one device), or a **device going quiet** (offline or
-  tampered with). Rules are evaluated
+  not just new to one device), a **device going quiet** (offline or
+  tampered with), or a **new device querying a first-seen domain**
+  together — a compound rule that fires only when BOTH are true within
+  minutes of each other (e.g. a freshly-plugged-in gadget immediately
+  phoning an unrecognized domain), a stronger signal than either "new
+  device" or "first-seen domain" alone. Rules are evaluated
   **server-side on a timer** (`ALERT_EVAL_INTERVAL_SECONDS`, default 60), so alerts fire and webhooks
   send even with no dashboard open. Fired alerts show in the Alerts panel, each
   with a **snooze** control (1h/24h/7d) to silence just that specific
@@ -235,6 +243,13 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   Rules and events are stored in DNS Watch's **own** writable SQLite database
   (`DNSWATCH_DB_PATH`, default `/data/dnswatch.db`, mounted as the `dnswatch-data`
   volume) — Pi-hole's database is still only ever opened read-only.
+- **Backup & restore** — download a portable JSON snapshot of everything you've
+  manually curated (tags, alert rules, device names, webhook settings) from
+  **⚙ Settings**, and restore it later — onto the same install or a fresh one.
+  Restoring **merges** rather than replaces: existing tags/rules/names are left
+  alone, nothing is deleted. The webhook secret is never included (the API
+  never exposes it in plaintext to begin with) — re-enter it by hand after
+  restoring onto a new install.
 - **Known DoH/DoT provider query** — flags when a client queries a well-known
   DNS-over-HTTPS/TLS provider's own domain (Cloudflare, Google, OpenDNS, Quad9,
   NextDNS, AdGuard DNS, and a few others — a small maintained list, not

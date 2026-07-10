@@ -127,6 +127,16 @@ export interface FanoutEntry {
   clients: FanoutClient[];
 }
 
+// Domains ranked by average resolution latency (#47) -- Pi-hole's own
+// reply_time, surfacing slow/uncached/upstream-forwarded lookups. Empty on
+// schemas without a reply_time column at all (see db.slowest_domains).
+export interface QueryLatencyEntry {
+  domain: string;
+  avg_reply_ms: number;
+  max_reply_ms: number;
+  query_count: number;
+}
+
 export type RuleType =
   | "volume_threshold"
   | "new_device"
@@ -135,7 +145,8 @@ export type RuleType =
   | "new_vendor"
   | "doh_provider"
   | "digest"
-  | "first_seen_domain";
+  | "first_seen_domain"
+  | "correlated_new_device_domain";
 
 export interface AlertRule {
   id: number;
@@ -214,6 +225,20 @@ export interface AppSettings {
   // The server never returns the real secret (it's a bearer credential for an
   // external service) — only whether one is currently configured.
   webhook_secret_set: boolean;
+}
+
+// Config backup/export (#45) — a portable JSON snapshot of everything the
+// user manually curated (tags, alert rules, device names, webhook settings
+// minus the secret, which the API never exposes in plaintext). Typed as
+// unknown on the wire since the frontend never needs to inspect its
+// contents — it's just downloaded/uploaded whole.
+export type BackupData = Record<string, unknown>;
+
+export interface BackupRestoreSummary {
+  tags: number;
+  alert_rules: number;
+  device_names: number;
+  settings_restored: boolean;
 }
 
 export interface AppSettingsUpdate {
@@ -406,6 +431,9 @@ export const api = {
       `/api/domain-fanout${qs({ range, bucket_minutes: bucketMinutes, min_clients: minClients })}`
     ),
 
+  queryLatency: (range: string) =>
+    getJson<QueryLatencyEntry[]>(`/api/query-latency${qs({ range })}`),
+
   clientHeatmap: (ip: string, days = 7) =>
     getJson<HeatmapResult>(
       `/api/client/${encodeURIComponent(ip)}/heatmap${qs({
@@ -471,4 +499,8 @@ export const api = {
       secret,
       format,
     }),
+
+  backupUrl: "/api/backup",
+  restoreBackup: (data: BackupData) =>
+    sendJson<BackupRestoreSummary>("/api/backup/restore", "POST", data),
 };

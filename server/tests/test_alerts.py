@@ -526,3 +526,148 @@ def test_unsnooze(client):
 
     # A second unsnooze of the same (now-removed) key 404s.
     assert client.delete(f"/api/alert-snoozes/{ev['dedup_key']}").status_code == 404
+
+
+def _insert_new_client_query(ftl, ip: str, name: str, domain: str, ts: float) -> None:
+    """A single query from a client NOT in the standard CLIENTS fixture,
+    registering just enough per-schema identity plumbing for
+    db.new_clients()/db.domain_queriers() to recognize it as genuinely new."""
+    import sqlite3
+    from conftest import _idstore_client_id, _idstore_domain_id
+
+    conn = sqlite3.connect(ftl["path"])
+    if ftl["schema"] == "new":
+        next_id = conn.execute("SELECT COALESCE(MAX(id),0)+1 FROM client").fetchone()[0]
+        conn.execute("INSERT INTO client (id, ip, name) VALUES (?,?,?)", (next_id, ip, name))
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,?)",
+            (int(ts), 1, 2, domain, next_id),
+        )
+    elif ftl["schema"] == "idstore":
+        cur = conn.cursor()
+        cid = _idstore_client_id(cur, ip, name)
+        did = _idstore_domain_id(cur, domain)
+        conn.execute(
+            "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (int(ts), 1, 2, did, cid),
+        )
+    else:  # "old" / "real"
+        next_id = conn.execute("SELECT COALESCE(MAX(id),0)+1 FROM network").fetchone()[0]
+        if ftl["schema"] == "real":
+            conn.execute(
+                "INSERT INTO network (id, hwaddr, macVendor) VALUES (?,?,NULL)",
+                (next_id, f"aa:bb:cc:dd:ee:{next_id:02x}"),
+            )
+            conn.execute(
+                "INSERT INTO network_addresses (network_id, ip, lastSeen, name, nameUpdated) "
+                "VALUES (?,?,?,?,?)",
+                (next_id, ip, int(ts), name, int(ts)),
+            )
+        else:
+            conn.execute("INSERT INTO network VALUES (?,?)", (next_id, name))
+            conn.execute("INSERT INTO network_addresses VALUES (?,?)", (ip, next_id))
+        stored_ts = float(ts) if ftl["schema"] == "real" else int(ts)
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (stored_ts, 1, 2, domain, ip),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _insert_existing_client_query(ftl, ip: str, domain: str, ts: float) -> None:
+    """A query from an ALREADY-KNOWN CLIENTS ip -- reuses its existing
+    identity rather than creating a new one, so this client's global
+    first-seen is unaffected (or pulled further back if `ts` is older)."""
+    import sqlite3
+    from conftest import CLIENTS, _idstore_client_id, _idstore_domain_id
+
+    conn = sqlite3.connect(ftl["path"])
+    if ftl["schema"] == "new":
+        cid = next(i for i, (cip, _) in enumerate(CLIENTS, 1) if cip == ip)
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,?)",
+            (int(ts), 1, 2, domain, cid),
+        )
+    elif ftl["schema"] == "idstore":
+        cur = conn.cursor()
+        name = next(n for cip, n in CLIENTS if cip == ip)
+        cid = _idstore_client_id(cur, ip, name)
+        did = _idstore_domain_id(cur, domain)
+        conn.execute(
+            "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (int(ts), 1, 2, did, cid),
+        )
+    else:
+        stored_ts = float(ts) if ftl["schema"] == "real" else int(ts)
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (stored_ts, 1, 2, domain, ip),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_correlated_new_device_domain_fires_for_matched_pair(client, ftl):
+    """#46: a brand-new device querying a domain no client has ever queried
+    before, within the same short window, is a much stronger signal than
+    either half alone -- must fire, and the event must carry the structured
+    client_ip/domain target (#43's deep-linking depends on this)."""
+    from app import rollups
+
+    rollups.refresh_rollups()  # backfill everything build_ftl already seeded
+
+    now = int(time.time())
+    new_ip, new_domain = "192.168.1.99", "iot-callback.example.test"
+    _insert_new_client_query(ftl, new_ip, "gadget", new_domain, now)
+
+    rollups.refresh_rollups()  # pick up the new domain into seen_domains
+
+    client.post("/api/alert-rules", json={
+        "name": "Corr", "type": "correlated_new_device_domain",
+        "params": {"window_minutes": 60}})
+    events = client.get("/api/alerts").json()["events"]
+    corr = [e for e in events if e["type"] == "correlated_new_device_domain"]
+
+    assert any(e["client_ip"] == new_ip and e["domain"] == new_domain for e in corr)
+    hit = next(e for e in corr if e["client_ip"] == new_ip and e["domain"] == new_domain)
+    assert hit["dedup_key"] == f"corr:{hit['rule_id']}:{new_ip}:{new_domain}"
+
+
+def test_correlated_new_device_domain_requires_new_client_not_just_new_domain(client, ftl):
+    """A first-seen domain queried ONLY by an ALREADY-established client must
+    NOT fire this rule -- proves it's genuinely about the (new client, new
+    domain) PAIR, not "a new domain exists somewhere and a new client exists
+    somewhere else" (which first_seen_domain and new_device would each
+    already cover on their own)."""
+    from app import rollups
+    from conftest import CLIENTS
+
+    established_ip = CLIENTS[0][0]
+    now = int(time.time())
+    # Anchor this client's first-seen firmly in the past, regardless of
+    # build_ftl's own randomized fixture timestamps for it.
+    _insert_existing_client_query(ftl, established_ip, "old-anchor.example.test", now - 10 * 86400)
+    rollups.refresh_rollups()
+
+    new_domain = "not-actually-correlated.example.test"
+    _insert_existing_client_query(ftl, established_ip, new_domain, now)
+    rollups.refresh_rollups()
+
+    client.post("/api/alert-rules", json={
+        "name": "Corr", "type": "correlated_new_device_domain",
+        "params": {"window_minutes": 60}})
+    events = client.get("/api/alerts").json()["events"]
+    corr = [e for e in events if e["type"] == "correlated_new_device_domain"]
+    assert not any(e["domain"] == new_domain for e in corr)
+
+
+def test_correlated_new_device_domain_noop_before_rollup_backfilled(client, ftl):
+    """Before the rollup has ever been backfilled, rollups.new_domains()
+    returns None -- must be treated as "no signal yet", same guard
+    first_seen_domain already relies on."""
+    client.post("/api/alert-rules", json={
+        "name": "Corr", "type": "correlated_new_device_domain",
+        "params": {"window_minutes": 600000}})
+    events = client.get("/api/alerts").json()["events"]
+    assert not any(e["type"] == "correlated_new_device_domain" for e in events)
