@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
-import { ClientInfo, Filters, Tag } from "../api";
+import { ClientInfo, Filters, Tag, Vendor } from "../api";
 
 interface Props {
   filters: Filters;
   onChange: (f: Filters) => void;
   clients: ClientInfo[];
   tags: Tag[];
+  vendors: Vendor[];
   autoRefresh: boolean;
   onToggleAutoRefresh: () => void;
   csvHref: string;
@@ -34,6 +35,7 @@ export default function FilterBar({
   onChange,
   clients,
   tags,
+  vendors,
   autoRefresh,
   onToggleAutoRefresh,
   csvHref,
@@ -55,18 +57,26 @@ export default function FilterBar({
       ? [selectedClient, ...visibleClients]
       : visibleClients;
 
-  // A single dropdown covers both scopes (#31) -- "tag:<name>" or "ip:<ip>" --
-  // rather than two separate selects that would need their own mutual-
-  // exclusion bookkeeping. filters.client/filters.tag are still the plain
-  // values the rest of the app (and the API layer) reads.
-  const selectValue = filters.tag ? `tag:${filters.tag}` : filters.client ? `ip:${filters.client}` : "";
+  // A single dropdown covers all three scopes (#11/#31) -- "tag:<name>",
+  // "vendor:<name>", or "ip:<ip>" -- rather than separate selects that would
+  // need their own mutual-exclusion bookkeeping. filters.client/tag/vendor
+  // are still the plain values the rest of the app (and the API layer) reads.
+  const selectValue = filters.tag
+    ? `tag:${filters.tag}`
+    : filters.vendor
+      ? `vendor:${filters.vendor}`
+      : filters.client
+        ? `ip:${filters.client}`
+        : "";
   function handleScopeChange(value: string) {
     if (value.startsWith("tag:")) {
-      onChange({ ...filters, tag: value.slice(4), client: "" });
+      onChange({ ...filters, tag: value.slice(4), vendor: "", client: "" });
+    } else if (value.startsWith("vendor:")) {
+      onChange({ ...filters, vendor: value.slice(7), tag: "", client: "" });
     } else if (value.startsWith("ip:")) {
-      onChange({ ...filters, client: value.slice(3), tag: "" });
+      onChange({ ...filters, client: value.slice(3), tag: "", vendor: "" });
     } else {
-      onChange({ ...filters, client: "", tag: "" });
+      onChange({ ...filters, client: "", tag: "", vendor: "" });
     }
   }
 
@@ -87,6 +97,15 @@ export default function FilterBar({
             {tags.map((t) => (
               <option key={`tag:${t.name}`} value={`tag:${t.name}`}>
                 🏷 {t.name} ({t.ips.length})
+              </option>
+            ))}
+          </optgroup>
+        )}
+        {vendors.length > 0 && (
+          <optgroup label="Vendors">
+            {vendors.map((v) => (
+              <option key={`vendor:${v.name}`} value={`vendor:${v.name}`}>
+                {v.name} ({v.ips.length})
               </option>
             ))}
           </optgroup>
