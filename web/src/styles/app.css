@@ -903,7 +903,7 @@ tr:hover td {
 
 .alert-item {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   align-items: center;
   gap: 10px;
   padding: 7px 0;
@@ -913,6 +913,24 @@ tr:hover td {
 
 .alert-item:last-child {
   border-bottom: none;
+}
+
+/* Per-event snooze control (#42) — deliberately understated (matches
+   .anomaly-ip-link's faint/mono treatment) since it's a secondary action,
+   not the point of the row. */
+.alert-snooze-select {
+  background: transparent;
+  border: 1px solid var(--ink-border);
+  border-radius: 4px;
+  color: var(--ink-faint);
+  font-size: 11px;
+  padding: 2px 4px;
+}
+
+.alert-snoozed {
+  color: var(--ink-faint);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .alert-dot {
@@ -1044,6 +1062,24 @@ tr:hover td {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* #43: a fired event with a structured client_ip/domain target renders its
+   message as this instead of a plain <span> -- same visual weight as the
+   text version, just clickable, so deep-linking doesn't make the alerts
+   list look like a button farm. */
+.alert-msg-link {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.alert-msg-link:hover {
+  text-decoration: underline dotted;
 }
 
 .alert-meta {

@@ -521,6 +521,32 @@ def api_alerts(limit: int = Query(50, ge=1, le=200)):
     return {"evaluated_at": int(time.time()), "new": len(fired), "events": alerts.list_events(limit)}
 
 
+class SnoozeRequest(BaseModel):
+    until: int  # unix ts
+
+
+@app.post("/api/alert-events/{event_id}/snooze")
+def api_snooze_event(event_id: int, body: SnoozeRequest):
+    """Silence future recurrences of this ONE fired event's underlying
+    condition (its dedup_key -- e.g. one device's new-vendor alert) until
+    `until`, without touching the rule or any other client/domain it also
+    watches (#42)."""
+    result = alerts.snooze_event(event_id, body.until)
+    if result is None:
+        raise HTTPException(status_code=404, detail="event not found")
+    return result
+
+
+@app.delete("/api/alert-snoozes/{dedup_key}")
+def api_unsnooze(dedup_key: str):
+    """Lift a snooze early. The frontend must URL-encode `dedup_key` (it
+    legitimately contains colons, e.g. "vendor:12:192.168.1.50" -- see
+    alerts.py's dedup_key convention) when building the request URL."""
+    if not alerts.unsnooze(dedup_key):
+        raise HTTPException(status_code=404, detail="no active snooze for this key")
+    return {"unsnoozed": dedup_key}
+
+
 @app.get("/api/alert-rules")
 def api_list_rules():
     return alerts.list_rules()
