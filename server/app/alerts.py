@@ -105,8 +105,26 @@ def init_store() -> None:
                 last_sent_period TEXT NOT NULL,
                 last_sent_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS alert_snoozes (
+                dedup_key TEXT PRIMARY KEY,
+                snoozed_until INTEGER NOT NULL
+            );
             """
         )
+        # client_ip/domain (#43) are added via ALTER rather than baked into
+        # the CREATE TABLE above, matching how every other post-launch
+        # alert_events change in this file has been done (new tables, not
+        # schema changes to existing ones) -- this is the one field-add
+        # exception, needed so a fired event can carry a structured target
+        # (for snoozing -- #42 -- and cross-view deep-linking -- #43)
+        # instead of only a free-text `message`. Guarded on PRAGMA table_info
+        # since SQLite has no ADD COLUMN IF NOT EXISTS, so this stays
+        # idempotent across every init_store() call, not just the first.
+        existing_cols = {r["name"] for r in conn.execute("PRAGMA table_info(alert_events)")}
+        if "client_ip" not in existing_cols:
+            conn.execute("ALTER TABLE alert_events ADD COLUMN client_ip TEXT")
+        if "domain" not in existing_cols:
+            conn.execute("ALTER TABLE alert_events ADD COLUMN domain TEXT")
         conn.commit()
 
 
@@ -564,7 +582,7 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
                     _emit(pending, rule, "warning",
                           f"{c['name']} made {c['count']} queries in {window_min}m "
                           f"(≥ {threshold})",
-                          f"vol:{rule['id']}:{c['ip']}")
+                          f"vol:{rule['id']}:{c['ip']}", client_ip=c["ip"])
         else:
             client = _resolve_rule_client(p)
             total = db.summary(client, since, None)["total_queries"]
@@ -572,7 +590,8 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
                 who = _describe_scope(p, client)
                 _emit(pending, rule, "warning",
                       f"{total} queries from {who} in {window_min}m (≥ {threshold})",
-                      f"vol:{rule['id']}:{p.get('tag') or p.get('client') or 'any'}")
+                      f"vol:{rule['id']}:{p.get('tag') or p.get('client') or 'any'}",
+                      client_ip=client if isinstance(client, str) else None)
 
     elif rule["type"] == "new_device":
         window_min = int(p.get("window_minutes", 1440))
@@ -580,7 +599,7 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
         for c in db.new_clients(since):
             _emit(pending, rule, "info",
                   f"New device seen: {c['name']} ({c['ip']})",
-                  f"new:{rule['id']}:{c['ip']}")
+                  f"new:{rule['id']}:{c['ip']}", client_ip=c["ip"])
 
     elif rule["type"] == "domain_keyword":
         keyword = (p.get("keyword") or "").strip()
@@ -596,7 +615,7 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
             scope_suffix = "" if who == "all clients" else f" from {who}"
             _emit(pending, rule, "warning",
                   f'{count} queries matching "{keyword}"{scope_suffix} in {window_min}m (≥ {min_count})',
-                  f"kw:{rule['id']}")
+                  f"kw:{rule['id']}", client_ip=client if isinstance(client, str) else None)
 
     elif rule["type"] == "new_vendor":
         window_min = int(p.get("window_minutes", 1440))
@@ -606,7 +625,7 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
                 message = f"Device with unrecognized vendor joined: {c['name']} ({c['ip']})"
             else:
                 message = f"New vendor on the network: {c['vendor']} — {c['name']} ({c['ip']})"
-            _emit(pending, rule, "info", message, f"vendor:{rule['id']}:{c['ip']}")
+            _emit(pending, rule, "info", message, f"vendor:{rule['id']}:{c['ip']}", client_ip=c["ip"])
 
     elif rule["type"] == "doh_provider":
         # See db.DOH_PROVIDER_DOMAINS's module note: this detects a client
@@ -621,7 +640,8 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
                   f"{hit['provider']} ({hit['count']}x in {window_min}m) — this device may be "
                   f"setting up or falling back to a DNS resolver that bypasses Pi-hole, "
                   f"not confirmation that it has",
-                  f"doh:{rule['id']}:{hit['ip']}:{hit['provider']}")
+                  f"doh:{rule['id']}:{hit['ip']}:{hit['provider']}",
+                  client_ip=hit["ip"], domain=hit["provider"])
 
     elif rule["type"] == "first_seen_domain":
         # Domain-keyed sibling of new_device/new_vendor (#32): fires when a
@@ -640,7 +660,7 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
         for d in new_doms:
             _emit(pending, rule, "info",
                   f"New domain seen for the first time: {d['domain']}",
-                  f"domain:{rule['id']}:{d['domain']}")
+                  f"domain:{rule['id']}:{d['domain']}", domain=d["domain"])
 
     elif rule["type"] == "device_quiet":
         # Fire when a client that was active in the *prior* window has gone
@@ -658,7 +678,7 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
                 _emit(pending, rule, "warning",
                       f"{c['name']} went quiet — {c['count']} queries in the prior "
                       f"{window_min}m, none since ({note})",
-                      f"quiet:{rule['id']}:{c['ip']}")
+                      f"quiet:{rule['id']}:{c['ip']}", client_ip=c["ip"])
 
     elif rule["type"] == "digest":
         # Periodic "here's what changed" summary, not a condition trip -- see
@@ -707,6 +727,9 @@ def evaluate() -> list[dict]:
     fired: list[dict] = []
     with _eval_lock, _connect() as conn:
         for ev in pending:
+            snoozed_until = _snoozed_until(conn, ev["dedup_key"])
+            if snoozed_until and snoozed_until > now:
+                continue
             if ev["type"] == "digest":
                 if _dedup_exists(conn, ev["dedup_key"]):
                     continue
@@ -715,10 +738,11 @@ def evaluate() -> list[dict]:
                 if _recently_fired(conn, ev["dedup_key"], cooldown, now):
                     continue
             conn.execute(
-                "INSERT INTO alert_events (rule_id, rule_name, type, severity, message, dedup_key, created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO alert_events "
+                "(rule_id, rule_name, type, severity, message, dedup_key, created_at, client_ip, domain) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (ev["rule_id"], ev["rule_name"], ev["type"], ev["severity"],
-                 ev["message"], ev["dedup_key"], now),
+                 ev["message"], ev["dedup_key"], now, ev.get("client_ip"), ev.get("domain")),
             )
             if ev["type"] == "digest":
                 # Same commit as the event insert above -- a crash between
@@ -765,6 +789,58 @@ def list_events(limit: int = 50) -> list[dict]:
             "severity": r["severity"],
             "message": r["message"],
             "created_at": r["created_at"],
+            # dedup_key (#42) and client_ip/domain (#43) let the frontend act
+            # on a specific event -- snooze just this recurrence, or deep-link
+            # to the client/domain it's about -- instead of only rendering
+            # `message` as inert text.
+            "dedup_key": r["dedup_key"],
+            "client_ip": r["client_ip"],
+            "domain": r["domain"],
         }
         for r in rows
     ]
+
+
+def snooze_event(event_id: int, until: int) -> dict | None:
+    """Silence future recurrences of this specific fired event's dedup_key
+    until `until` (unix ts), without touching the rule itself or any other
+    client/domain/tag it also watches (#42). Returns the affected
+    dedup_key/until, or None if `event_id` doesn't exist.
+
+    Deliberately keyed on dedup_key rather than event_id/rule_id: it's the
+    exact granularity every rule type already uses to tell "this specific
+    recurrence" apart (e.g. "vendor:12:192.168.1.50" is one device's alert
+    under one rule, not the whole rule) -- see the module note by DEFAULT_COOLDOWN.
+    """
+    init_store()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT dedup_key FROM alert_events WHERE id = ?", (event_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        dedup_key = row["dedup_key"]
+        conn.execute(
+            "INSERT INTO alert_snoozes (dedup_key, snoozed_until) VALUES (?, ?) "
+            "ON CONFLICT(dedup_key) DO UPDATE SET snoozed_until = excluded.snoozed_until",
+            (dedup_key, until),
+        )
+        conn.commit()
+    return {"dedup_key": dedup_key, "snoozed_until": until}
+
+
+def unsnooze(dedup_key: str) -> bool:
+    """True if an active snooze was actually removed, so main.py can 404 on
+    an unknown/already-expired key."""
+    init_store()
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM alert_snoozes WHERE dedup_key = ?", (dedup_key,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def _snoozed_until(conn: sqlite3.Connection, dedup_key: str) -> int | None:
+    row = conn.execute(
+        "SELECT snoozed_until FROM alert_snoozes WHERE dedup_key = ?", (dedup_key,)
+    ).fetchone()
+    return row["snoozed_until"] if row else None
