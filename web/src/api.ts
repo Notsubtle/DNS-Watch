@@ -154,6 +154,13 @@ export interface AlertEvent {
   severity: "info" | "warning" | "critical";
   message: string;
   created_at: number;
+  // dedup_key (#42) identifies this exact recurrence (e.g. one device's
+  // new-vendor alert) for snoozing; client_ip/domain (#43) are the
+  // structured target -- when present -- for deep-linking into the
+  // dashboard/heatmap/fan-out view instead of only rendering `message`.
+  dedup_key: string;
+  client_ip: string | null;
+  domain: string | null;
 }
 
 export interface AlertsResponse {
@@ -418,6 +425,17 @@ export const api = {
     ),
 
   alerts: (limit = 50) => getJson<AlertsResponse>(`/api/alerts${qs({ limit })}`),
+  snoozeEvent: (id: number, until: number) =>
+    sendJson<{ dedup_key: string; snoozed_until: number }>(
+      `/api/alert-events/${id}/snooze`,
+      "POST",
+      { until }
+    ),
+  unsnooze: (dedupKey: string) =>
+    sendJson<{ unsnoozed: string }>(
+      `/api/alert-snoozes/${encodeURIComponent(dedupKey)}`,
+      "DELETE"
+    ),
   listRules: () => getJson<AlertRule[]>("/api/alert-rules"),
   createRule: (r: { name: string; type: RuleType; params: Record<string, unknown>; enabled?: boolean }) =>
     sendJson<AlertRule>("/api/alert-rules", "POST", r),

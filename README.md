@@ -222,10 +222,16 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   specific domain keywords (optionally scoped to a tag too), a **first-seen
   domain** (the domain-keyed sibling of "new device"/"new vendor" — fires when
   a domain is queried that no client has ever queried before, network-wide,
-  not just new to one device), or a **device going
-  blocked). Rules are evaluated
+  not just new to one device), or a **device going quiet** (offline or
+  tampered with). Rules are evaluated
   **server-side on a timer** (`ALERT_EVAL_INTERVAL_SECONDS`, default 60), so alerts fire and webhooks
-  send even with no dashboard open. Fired alerts show in the Alerts panel.
+  send even with no dashboard open. Fired alerts show in the Alerts panel, each
+  with a **snooze** control (1h/24h/7d) to silence just that specific
+  recurrence — e.g. one device's new-vendor alert — without disabling the rule
+  for every other client or domain it also watches. An alert about a specific
+  device or domain is also a **deep-link** — click it to jump straight to
+  that client's detail view or that domain's drill-down, instead of
+  re-finding it yourself.
   Rules and events are stored in DNS Watch's **own** writable SQLite database
   (`DNSWATCH_DB_PATH`, default `/data/dnswatch.db`, mounted as the `dnswatch-data`
   volume) — Pi-hole's database is still only ever opened read-only.
