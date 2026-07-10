@@ -252,6 +252,9 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   alone, nothing is deleted. The webhook secret is never included (the API
   never exposes it in plaintext to begin with) — re-enter it by hand after
   restoring onto a new install.
+- **Storage housekeeping** — **⚙ Settings** shows DNS Watch's writable database
+  size and alert event count, with a prune-by-age control for deleting old fired
+  alert history without touching rules, tags, device names, or webhook settings.
 - **Known DoH/DoT provider query** — flags when a client queries a well-known
   DNS-over-HTTPS/TLS provider's own domain (Cloudflare, Google, OpenDNS, Quad9,
   NextDNS, AdGuard DNS, and a few others — a small maintained list, not

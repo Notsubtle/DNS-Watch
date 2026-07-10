@@ -241,6 +241,11 @@ export interface BackupRestoreSummary {
   settings_restored: boolean;
 }
 
+export interface StorageStats {
+  db_size_bytes: number;
+  alert_events_count: number;
+}
+
 export interface AppSettingsUpdate {
   webhook_enabled?: boolean;
   webhook_url?: string;
@@ -503,4 +508,10 @@ export const api = {
   backupUrl: "/api/backup",
   restoreBackup: (data: BackupData) =>
     sendJson<BackupRestoreSummary>("/api/backup/restore", "POST", data),
+
+  storageStats: () => getJson<StorageStats>("/api/storage-stats"),
+  pruneEvents: (olderThanDays: number) =>
+    sendJson<{ deleted: number }>("/api/storage/prune-events", "POST", {
+      older_than_days: olderThanDays,
+    }),
 };
