@@ -37,6 +37,7 @@ _eval_lock = threading.Lock()
 VALID_TYPES = {
     "volume_threshold", "new_device", "domain_keyword", "device_quiet",
     "new_vendor", "doh_provider", "digest", "first_seen_domain",
+    "correlated_new_device_domain",
 }
 
 # Webhook payload shapes. "generic" is DNS Watch's own JSON; "slack"/"discord"
@@ -56,6 +57,7 @@ DEFAULT_COOLDOWN = {
     "new_vendor": 86400,
     "doh_provider": 86400,
     "first_seen_domain": 86400,
+    "correlated_new_device_domain": 86400,
     # No entry for "digest": its firing is gated on a calendar-period
     # boundary (see digest_schedule / _dedup_exists below), not an
     # elapsed-time cooldown, since that's the whole point of a digest.
@@ -661,6 +663,40 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
             _emit(pending, rule, "info",
                   f"New domain seen for the first time: {d['domain']}",
                   f"domain:{rule['id']}:{d['domain']}", domain=d["domain"])
+
+    elif rule["type"] == "correlated_new_device_domain":
+        # A brand-new device querying a domain no client has EVER queried
+        # before, close together in time, is a much stronger signal than
+        # either "new device" or "first-seen domain" alone (#46) -- e.g. a
+        # freshly-plugged-in IoT device immediately phoning an unrecognized
+        # domain. Built entirely from new_clients()/new_domains(), which
+        # new_device/first_seen_domain already compute -- no new collection.
+        window_min = int(p.get("window_minutes", 15))
+        since = now - window_min * 60
+        new_doms = rollups.new_domains(since)
+        if new_doms is None:
+            return  # rollup not backfilled yet -- no signal this tick, not "no matches"
+        new_clients_by_ip = {c["ip"]: c for c in db.new_clients(since)}
+        if not new_clients_by_ip:
+            return
+        for d in new_doms:
+            # +1: domain_queriers' upper bound is exclusive (timestamp <
+            # until), so a query landing in the SAME second this tick
+            # evaluates at -- entirely plausible, since that's often exactly
+            # when a just-joined device's first query would be seen -- must
+            # not be excluded by the boundary itself.
+            queriers = db.domain_queriers(d["domain"], since, now + 1)
+            for ip in queriers:
+                c = new_clients_by_ip.get(ip)
+                if c is None:
+                    continue
+                if abs(c["first_seen"] - d["first_seen"]) > window_min * 60:
+                    continue  # both are "new", but not close enough together in time
+                _emit(pending, rule, "warning",
+                      f"New device {c['name']} ({ip}) queried newly-seen domain "
+                      f"{d['domain']} within {window_min}m of joining the network",
+                      f"corr:{rule['id']}:{ip}:{d['domain']}",
+                      client_ip=ip, domain=d["domain"])
 
     elif rule["type"] == "device_quiet":
         # Fire when a client that was active in the *prior* window has gone

@@ -2060,6 +2060,41 @@ def slowest_domains(
     return out
 
 
+def domain_queriers(domain: str, since: int, until: int) -> list[str]:
+    """Distinct client ips that queried `domain` (exact match) within
+    [since, until) -- backs the correlated_new_device_domain alert rule
+    (#46), which needs to know WHO queried a just-first-seen domain so it
+    can check whether any of them is also a brand-new client. A small,
+    bounded, single-domain lookup (not a hot-path aggregate), so this
+    doesn't need domain_fanout's id-based fast path treatment."""
+    if detect_schema().has_id_storage:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM domain_by_id WHERE domain = ?", [domain]
+            ).fetchone()
+            if row is None:  # never actually stored under this exact text -- no queriers
+                return []
+            ipmap = _client_ip_map(conn)
+            rows = conn.execute(
+                "SELECT DISTINCT client FROM query_storage "
+                "WHERE domain = ? AND timestamp >= ? AND timestamp < ?",
+                [row["id"], since, until],
+            ).fetchall()
+        ips = {_resolve_client_value(r["client"], ipmap) for r in rows}
+        ips.discard(None)
+        return sorted(ips)
+
+    _, join = _client_join_sql()
+    client_col = _client_ip_col()
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT DISTINCT {client_col} AS ip FROM queries q {join} "
+            "WHERE q.domain = ? AND q.timestamp >= ? AND q.timestamp < ?",
+            [domain, since, until],
+        ).fetchall()
+    return sorted(r["ip"] for r in rows if r["ip"] is not None)
+
+
 TOP_DOMAINS_LIMIT = 50  # how many matched domains the breakdown returns
 
 # Caps the AGGREGATE wall-clock cost of one simulate_pattern() call, independent

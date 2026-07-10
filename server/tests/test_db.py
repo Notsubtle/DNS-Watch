@@ -273,3 +273,68 @@ def test_new_clients_cutoff(ftl):
     now = int(time.time())
     assert len(db.new_clients(now - 7200)) == 4
     assert db.new_clients(now + 3600) == []
+
+
+def test_domain_queriers(ftl):
+    """#46: distinct client ips that queried an exact domain within a window
+    -- backs the correlated_new_device_domain alert rule, which needs to know
+    WHO queried a just-first-seen domain. Two clients inside the window must
+    both be returned; a third client's query OUTSIDE the window must not be;
+    a domain never queried at all must return []."""
+    import sqlite3
+    import time
+    from conftest import CLIENTS, _idstore_client_id, _idstore_domain_id
+    from app import db
+
+    now = int(time.time())
+    domain = "correlated-target.example.test"
+    in_window_ips = [CLIENTS[0][0], CLIENTS[1][0]]
+    outside_ip = CLIENTS[2][0]
+
+    conn = sqlite3.connect(ftl["path"])
+    if ftl["schema"] == "new":
+        for ip in in_window_ips:
+            cid = next(i for i, (cip, _) in enumerate(CLIENTS, 1) if cip == ip)
+            conn.execute(
+                "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,?)",
+                (now, 1, 2, domain, cid),
+            )
+        cid = next(i for i, (cip, _) in enumerate(CLIENTS, 1) if cip == outside_ip)
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,?)",
+            (now - 7200, 1, 2, domain, cid),
+        )
+    elif ftl["schema"] == "idstore":
+        cur = conn.cursor()
+        did = _idstore_domain_id(cur, domain)
+        for ip in in_window_ips:
+            name = next(n for cip, n in CLIENTS if cip == ip)
+            cid = _idstore_client_id(cur, ip, name)
+            conn.execute(
+                "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                (now, 1, 2, did, cid),
+            )
+        name = next(n for cip, n in CLIENTS if cip == outside_ip)
+        cid = _idstore_client_id(cur, outside_ip, name)
+        conn.execute(
+            "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (now - 7200, 1, 2, did, cid),
+        )
+    else:
+        stored_ts = float(now) if ftl["schema"] == "real" else now
+        old_ts = float(now - 7200) if ftl["schema"] == "real" else now - 7200
+        for ip in in_window_ips:
+            conn.execute(
+                "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                (stored_ts, 1, 2, domain, ip),
+            )
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (old_ts, 1, 2, domain, outside_ip),
+        )
+    conn.commit()
+    conn.close()
+
+    result = set(db.domain_queriers(domain, now - 60, now + 60))
+    assert result == set(in_window_ips)
+    assert db.domain_queriers("never-queried.example.test", now - 60, now + 60) == []
