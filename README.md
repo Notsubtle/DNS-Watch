@@ -227,6 +227,13 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   Rules and events are stored in DNS Watch's **own** writable SQLite database
   (`DNSWATCH_DB_PATH`, default `/data/dnswatch.db`, mounted as the `dnswatch-data`
   volume) — Pi-hole's database is still only ever opened read-only.
+- **Backup & restore** — download a portable JSON snapshot of everything you've
+  manually curated (tags, alert rules, device names, webhook settings) from
+  **⚙ Settings**, and restore it later — onto the same install or a fresh one.
+  Restoring **merges** rather than replaces: existing tags/rules/names are left
+  alone, nothing is deleted. The webhook secret is never included (the API
+  never exposes it in plaintext to begin with) — re-enter it by hand after
+  restoring onto a new install.
 - **Known DoH/DoT provider query** — flags when a client queries a well-known
   DNS-over-HTTPS/TLS provider's own domain (Cloudflare, Google, OpenDNS, Quad9,
   NextDNS, AdGuard DNS, and a few others — a small maintained list, not

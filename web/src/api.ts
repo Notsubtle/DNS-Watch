@@ -202,6 +202,20 @@ export interface AppSettings {
   webhook_secret_set: boolean;
 }
 
+// Config backup/export (#45) — a portable JSON snapshot of everything the
+// user manually curated (tags, alert rules, device names, webhook settings
+// minus the secret, which the API never exposes in plaintext). Typed as
+// unknown on the wire since the frontend never needs to inspect its
+// contents — it's just downloaded/uploaded whole.
+export type BackupData = Record<string, unknown>;
+
+export interface BackupRestoreSummary {
+  tags: number;
+  alert_rules: number;
+  device_names: number;
+  settings_restored: boolean;
+}
+
 export interface AppSettingsUpdate {
   webhook_enabled?: boolean;
   webhook_url?: string;
@@ -436,4 +450,8 @@ export const api = {
       secret,
       format,
     }),
+
+  backupUrl: "/api/backup",
+  restoreBackup: (data: BackupData) =>
+    sendJson<BackupRestoreSummary>("/api/backup/restore", "POST", data),
 };
