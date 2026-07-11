@@ -227,14 +227,18 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   domain** (the domain-keyed sibling of "new device"/"new vendor" — fires when
   a domain is queried that no client has ever queried before, network-wide,
   not just new to one device), a **device going quiet** (offline or
-  tampered with), or a **new device querying a first-seen domain**
+  tampered with), a **new device querying a first-seen domain**
   together — a compound rule that fires only when BOTH are true within
   minutes of each other (e.g. a freshly-plugged-in gadget immediately
   phoning an unrecognized domain), a stronger signal than either "new
-  device" or "first-seen domain" alone. Before saving a query-volume,
-  domain-keyword, or device-quiet rule, hit **Preview** to see how many
-  times it would have fired over the last 7 days — no more save/wait/adjust
-  against the live 60s eval loop to tune a threshold. Rules are evaluated
+  device" or "first-seen domain" alone, or an **unusual query type** — a
+  client using a DNS query type (TXT, ANY, ...) it has never used before, a
+  shift in *what kind* of query a device makes rather than how many, the
+  kind of signal a pure query-volume rule can't see. Before saving a
+  query-volume, domain-keyword, or device-quiet rule, hit **Preview** to see
+  how many times it would have fired over the last 7 days — no more
+  save/wait/adjust against the live 60s eval loop to tune a threshold. Rules
+  are evaluated
   **server-side on a timer** (`ALERT_EVAL_INTERVAL_SECONDS`, default 60), so alerts fire and webhooks
   send even with no dashboard open. Fired alerts show in the Alerts panel, each
   with a **snooze** control (1h/24h/7d) to silence just that specific

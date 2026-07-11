@@ -37,7 +37,7 @@ _eval_lock = threading.Lock()
 VALID_TYPES = {
     "volume_threshold", "new_device", "domain_keyword", "device_quiet",
     "new_vendor", "doh_provider", "digest", "first_seen_domain",
-    "correlated_new_device_domain",
+    "correlated_new_device_domain", "unusual_query_type",
 }
 
 # Webhook payload shapes. "generic" is DNS Watch's own JSON; "slack"/"discord"
@@ -58,6 +58,7 @@ DEFAULT_COOLDOWN = {
     "doh_provider": 86400,
     "first_seen_domain": 86400,
     "correlated_new_device_domain": 86400,
+    "unusual_query_type": 86400,
     # No entry for "digest": its firing is gated on a calendar-period
     # boundary (see digest_schedule / _dedup_exists below), not an
     # elapsed-time cooldown, since that's the whole point of a digest.
@@ -743,6 +744,21 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
                       f"{d['domain']} within {window_min}m of joining the network",
                       f"corr:{rule['id']}:{ip}:{d['domain']}",
                       client_ip=ip, domain=d["domain"])
+
+    elif rule["type"] == "unusual_query_type":
+        # A shift in query-type COMPOSITION, not volume (#55) -- a client
+        # using a DNS query type it has never used before (e.g. only ever
+        # A/AAAA, suddenly TXT/ANY), a classic tunneling/exfil signature
+        # volume_threshold has no way to see since it only counts queries,
+        # not what kind they are.
+        window_min = int(p.get("window_minutes", 60))
+        for hit in db.unusual_query_types(window_min):
+            types_str = ", ".join(hit["new_types"])
+            _emit(pending, rule, "warning",
+                  f"{hit['name']} ({hit['ip']}) used a query type it has never used "
+                  f"before: {types_str} (within {window_min}m)",
+                  f"qtype:{rule['id']}:{hit['ip']}",
+                  client_ip=hit["ip"])
 
     elif rule["type"] == "device_quiet":
         # Fire when a client that was active in the *prior* window has gone

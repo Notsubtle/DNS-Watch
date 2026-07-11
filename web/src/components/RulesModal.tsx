@@ -17,6 +17,7 @@ const TYPE_LABELS: Record<RuleType, string> = {
   digest: "Periodic digest",
   first_seen_domain: "First-seen domain",
   correlated_new_device_domain: "New device + first-seen domain",
+  unusual_query_type: "Unusual query type",
 };
 
 const RULE_TYPES = Object.keys(TYPE_LABELS) as RuleType[];
@@ -41,6 +42,9 @@ function describe(rule: AlertRule): string {
   }
   if (rule.type === "correlated_new_device_domain") {
     return `a new device queries a first-seen domain within ${p.window_minutes ?? 15}m of joining`;
+  }
+  if (rule.type === "unusual_query_type") {
+    return `a client uses a DNS query type it has never used before, within ${p.window_minutes ?? 60}m`;
   }
   if (rule.type === "doh_provider") {
     return `a client queries a known DoH/DoT provider domain (setup/fallback lookups, not confirmed bypass) within ${p.window_minutes ?? 60}m`;
@@ -115,7 +119,8 @@ export default function RulesModal({ onClose, onChange, tags }: Props) {
       type === "new_vendor" ||
       type === "doh_provider" ||
       type === "first_seen_domain" ||
-      type === "correlated_new_device_domain"
+      type === "correlated_new_device_domain" ||
+      type === "unusual_query_type"
     ) {
       return { window_minutes: windowMin };
     }
