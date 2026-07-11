@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { AlertRule, api, RuleType, Tag } from "../api";
 
 const TYPE_LABELS: Record<RuleType, string> = {
@@ -12,6 +12,8 @@ const TYPE_LABELS: Record<RuleType, string> = {
   first_seen_domain: "First-seen domain",
   correlated_new_device_domain: "New device + first-seen domain",
 };
+
+const RULE_TYPES = Object.keys(TYPE_LABELS) as RuleType[];
 
 function describe(rule: AlertRule): string {
   const p = rule.params as Record<string, number | string>;
@@ -57,6 +59,7 @@ export default function RulesModal({ onClose, onChange, tags }: Props) {
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [ruleFilter, setRuleFilter] = useState("");
 
   // Add-form state
   const [type, setType] = useState<RuleType>("volume_threshold");
@@ -142,6 +145,12 @@ export default function RulesModal({ onClose, onChange, tags }: Props) {
     onChange();
   }
 
+  const normalizedFilter = ruleFilter.trim().toLowerCase();
+  const visibleRules = normalizedFilter
+    ? rules.filter((r) => r.name.toLowerCase().includes(normalizedFilter))
+    : rules;
+  const hasActiveFilter = normalizedFilter.length > 0;
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
@@ -154,30 +163,54 @@ export default function RulesModal({ onClose, onChange, tags }: Props) {
 
         {error && <div className="error-banner">{error}</div>}
 
+        <div className="rule-filter">
+          <input
+            type="text"
+            value={ruleFilter}
+            onChange={(e) => setRuleFilter(e.target.value)}
+            placeholder="Search rules by name"
+            aria-label="Search rules by name"
+          />
+        </div>
+
         <ul className="rule-list">
-          {rules.map((r) => (
-            <li key={r.id} className={r.enabled ? "" : "disabled"}>
-              <div className="rule-info">
-                <span className="rule-name">{r.name}</span>
-                <span className="rule-desc">{describe(r)}</span>
-              </div>
-              <label className="rule-toggle">
-                <input type="checkbox" checked={r.enabled} onChange={() => toggle(r)} />
-                <span>{r.enabled ? "On" : "Off"}</span>
-              </label>
-              <button className="btn-danger" onClick={() => remove(r)} aria-label="Delete rule">
-                Delete
-              </button>
-            </li>
-          ))}
+          {RULE_TYPES.map((ruleType) => {
+            const groupRules = visibleRules.filter((r) => r.type === ruleType);
+            if (groupRules.length === 0) {
+              return null;
+            }
+            return (
+              <Fragment key={ruleType}>
+                <li className="rule-group-heading">{TYPE_LABELS[ruleType]}</li>
+                {groupRules.map((r) => (
+                  <li key={r.id} className={r.enabled ? "" : "disabled"}>
+                    <div className="rule-info">
+                      <span className="rule-name">{r.name}</span>
+                      <span className="rule-desc">{describe(r)}</span>
+                    </div>
+                    <label className="rule-toggle">
+                      <input type="checkbox" checked={r.enabled} onChange={() => toggle(r)} />
+                      <span>{r.enabled ? "On" : "Off"}</span>
+                    </label>
+                    <button className="btn-danger" onClick={() => remove(r)} aria-label="Delete rule">
+                      Delete
+                    </button>
+                  </li>
+                ))}
+              </Fragment>
+            );
+          })}
           {rules.length === 0 && <li className="rule-empty">No rules yet.</li>}
+          {rules.length > 0 && hasActiveFilter && visibleRules.length === 0 && (
+            <li className="rule-empty">No rules match your search.</li>
+          )}
         </ul>
 
         <h3 className="modal-section">Add a rule</h3>
         <form className="rule-form" onSubmit={add}>
           <div className="rule-form-row">
             <select value={type} onChange={(e) => setType(e.target.value as RuleType)}>
-              {(Object.keys(TYPE_LABELS) as RuleType[]).map((t) => (
+              {RULE_TYPES.map((t) => (
                 <option key={t} value={t}>
                   {TYPE_LABELS[t]}
                 </option>

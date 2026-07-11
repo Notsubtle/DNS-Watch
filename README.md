@@ -239,7 +239,9 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   for every other client or domain it also watches. An alert about a specific
   device or domain is also a **deep-link** — click it to jump straight to
   that client's detail view or that domain's drill-down, instead of
-  re-finding it yourself.
+  re-finding it yourself. The rules modal groups saved rules by type and
+  includes a quick name search for finding one rule without scanning the whole
+  list.
   Rules and events are stored in DNS Watch's **own** writable SQLite database
   (`DNSWATCH_DB_PATH`, default `/data/dnswatch.db`, mounted as the `dnswatch-data`
   volume) — Pi-hole's database is still only ever opened read-only.
