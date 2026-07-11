@@ -571,6 +571,23 @@ def _events_since(conn: sqlite3.Connection, since: int) -> list[dict]:
     ]
 
 
+def _anomaly_digest_clause(anomalies: list[dict]) -> str | None:
+    if not anomalies:
+        return None
+    counts = {"spike": 0, "silent": 0}
+    for anomaly in anomalies:
+        kind = anomaly.get("kind")
+        if kind in counts:
+            counts[kind] += 1
+    breakdown = []
+    if counts["spike"]:
+        breakdown.append(f"{counts['spike']} spike")
+    if counts["silent"]:
+        breakdown.append(f"{counts['silent']} silent")
+    suffix = f": {', '.join(breakdown)}" if breakdown else ""
+    return f"{len(anomalies)} anomaly(ies){suffix}"
+
+
 def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
     p = rule["params"]
     if rule["type"] == "volume_threshold":
@@ -731,12 +748,16 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
             since = sched["last_sent_at"] if sched else now - (86400 if freq == "daily" else 7 * 86400)
             events = _events_since(conn, since)
         new_devices = db.new_clients(since)
+        anomalies = db.detect_anomalies()
         parts = []
         if events:
             parts.append(f"{len(events)} alert(s) fired")
         if new_devices:
             names = ", ".join(c["name"] for c in new_devices[:10])
             parts.append(f"{len(new_devices)} new device(s): {names}")
+        anomaly_clause = _anomaly_digest_clause(anomalies)
+        if anomaly_clause:
+            parts.append(anomaly_clause)
         summary = "; ".join(parts) if parts else "no alerts or new devices"
         message = f"{freq.capitalize()} digest — {summary} since the last digest"
         _emit(pending, rule, "info", message, f"digest:{rule['id']}:{period}",
