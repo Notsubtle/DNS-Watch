@@ -34,6 +34,16 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DB_PATH = os.environ.get("PIHOLE_DB_PATH", "/pihole-data/pihole-FTL.db")
 
+# dnsmasq's DHCP lease file (#58) -- lives alongside pihole-FTL.db in the same
+# already-mounted, already read-only PIHOLE_ETC_PATH folder (see
+# docker-compose.yml), so reading it needs no new privileges, no host
+# networking -- just another file in a mount this app already has. Defaults
+# to a sibling of DB_PATH rather than requiring a separate env var/compose
+# change for the common case where both files share Pi-hole's etc folder.
+LEASES_PATH = os.environ.get(
+    "PIHOLE_DHCP_LEASES_PATH", os.path.join(os.path.dirname(DB_PATH), "dhcp.leases")
+)
+
 # Best-effort classification of Pi-hole FTL's internal query status codes.
 # Raw status is always returned alongside so a mismatch is visible, not hidden.
 BLOCKED_STATUSES = {1, 4, 5, 6, 7, 8, 9, 10, 11, 16, 18, 19, 20, 21, 22, 23, 24, 25}
@@ -2571,11 +2581,68 @@ PRESENCE_MAC_UNKNOWN_NOTE = (
 )
 
 
+def _read_dhcp_leases() -> dict[str, tuple[str, int]]:
+    """mac (lowercase) -> (ip, expiry_epoch), parsed from dnsmasq's lease
+    file at LEASES_PATH (#58) -- one line per lease:
+    '<expiry-epoch> <mac> <ip> <hostname-or-*> <client-id-or-*>'.
+
+    Returns {} when the file is missing, empty, or unreadable -- this is the
+    common case when Pi-hole ISN'T the network's DHCP server (e.g. the
+    router handles DHCP instead, confirmed to be the more common home-network
+    topology by checking this project's own production instance), not an
+    error. Silently degrading here is the same discipline the PTR
+    reverse-DNS fallback already has, and NOT active presence probing (see
+    #13's own scope-block) -- this only ever reads whatever Pi-hole's own
+    dnsmasq already wrote to a file already inside the existing read-only
+    mount, never touches the network itself.
+    """
+    try:
+        with open(LEASES_PATH, encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return {}
+    leases: dict[str, tuple[str, int]] = {}
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        try:
+            expiry = int(parts[0])
+        except ValueError:
+            continue
+        leases[parts[1].lower()] = (parts[2], expiry)
+    return leases
+
+
+def _lease_confidence_note(ip: str, hwaddr: str | None) -> str | None:
+    """A DHCP-lease-derived confidence annotation to append to `ip`'s quiet-
+    presence note (#58), or None when unavailable/inapplicable. Requires a
+    KNOWN hwaddr for this client (mac_known) as well as a lease record for
+    that exact mac still pointing at this same ip -- a lease for a
+    different ip means the mac has since moved (or DHCP reassigned this ip
+    to someone else), which isn't a presence signal for the client being
+    asked about."""
+    if not hwaddr:
+        return None
+    lease = _read_dhcp_leases().get(hwaddr.lower())
+    if lease is None or lease[0] != ip:
+        return None
+    _, expiry = lease
+    now = int(time.time())
+    if expiry <= now:
+        age_h = (now - expiry) // 3600
+        return f"its DHCP lease expired {age_h}h ago"
+    return "its DHCP lease is still active (the device may simply be idle)"
+
+
 def quiet_presence_note(ip: str) -> str:
     """The qualifier to append to a "client went quiet" message/event for `ip`."""
     with _connect() as conn:
-        mac_known = _vendor_fields(ip, _client_vendor_map(conn))["mac_known"]
-    return PRESENCE_MAC_KNOWN_NOTE if mac_known else PRESENCE_MAC_UNKNOWN_NOTE
+        fields = _vendor_fields(ip, _client_vendor_map(conn))
+    mac_known = fields["mac_known"]
+    base = PRESENCE_MAC_KNOWN_NOTE if mac_known else PRESENCE_MAC_UNKNOWN_NOTE
+    lease_note = _lease_confidence_note(ip, fields["hwaddr"]) if mac_known else None
+    return f"{base} — {lease_note}" if lease_note else base
 
 
 def health() -> dict:
