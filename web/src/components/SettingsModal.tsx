@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, BackupRestoreSummary, WebhookFormat } from "../api";
+import { api, BackupRestoreSummary, StorageStats, WebhookFormat } from "../api";
 
 interface Props {
   onClose: () => void;
@@ -10,6 +10,18 @@ const FORMATS: { value: WebhookFormat; label: string }[] = [
   { value: "slack", label: "Slack" },
   { value: "discord", label: "Discord" },
 ];
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
 
 export default function SettingsModal({ onClose }: Props) {
   const [enabled, setEnabled] = useState(false);
@@ -35,6 +47,14 @@ export default function SettingsModal({ onClose }: Props) {
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Storage housekeeping (#59).
+  const [storageStats, setStorageStats] = useState<StorageStats | null>(null);
+  const [storageLoading, setStorageLoading] = useState(false);
+  const [storageError, setStorageError] = useState<string | null>(null);
+  const [pruneDays, setPruneDays] = useState("90");
+  const [pruning, setPruning] = useState(false);
+  const [pruneResult, setPruneResult] = useState<string | null>(null);
+
   useEffect(() => {
     api
       .getSettings()
@@ -46,6 +66,10 @@ export default function SettingsModal({ onClose }: Props) {
       })
       .catch((e) => setError((e as Error).message))
       .finally(() => setLoaded(true));
+  }, []);
+
+  useEffect(() => {
+    loadStorageStats();
   }, []);
 
   useEffect(() => {
@@ -120,6 +144,38 @@ export default function SettingsModal({ onClose }: Props) {
     }
   }
 
+  async function loadStorageStats() {
+    setStorageLoading(true);
+    try {
+      setStorageStats(await api.storageStats());
+      setStorageError(null);
+    } catch (e) {
+      setStorageError((e as Error).message);
+    } finally {
+      setStorageLoading(false);
+    }
+  }
+
+  async function pruneOldEvents() {
+    const days = Math.floor(Number(pruneDays));
+    if (!Number.isFinite(days) || days < 1) {
+      setStorageError("Enter at least 1 day.");
+      return;
+    }
+    setPruning(true);
+    setPruneResult(null);
+    try {
+      const result = await api.pruneEvents(days);
+      setPruneResult(`Deleted ${result.deleted} event(s) older than ${days} days.`);
+      setStorageError(null);
+      await loadStorageStats();
+    } catch (e) {
+      setStorageError((e as Error).message);
+    } finally {
+      setPruning(false);
+    }
+  }
+
   const secretPlaceholder =
     format === "slack" || format === "discord"
       ? "not used for this format"
@@ -132,6 +188,8 @@ export default function SettingsModal({ onClose }: Props) {
       ? "Slack/Discord put the secret in the webhook URL itself — leave this blank."
       : "Sent as an Authorization: Bearer header (e.g. an ntfy access token). " +
         "For security this is never sent back to the browser once saved — retype it here to change it or to run a test.";
+  const pruneDaysNumber = Number(pruneDays);
+  const pruneDisabled = pruning || !Number.isFinite(pruneDaysNumber) || pruneDaysNumber < 1;
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -260,6 +318,50 @@ export default function SettingsModal({ onClose }: Props) {
                 {restoreSummary.settings_restored ? ", and webhook settings" : ""}.
               </div>
             )}
+
+            <h3 className="modal-section">Storage</h3>
+            <div className="settings-storage-grid">
+              <div>
+                <span className="settings-label">Database size</span>
+                <strong>{storageStats ? formatBytes(storageStats.db_size_bytes) : "…"}</strong>
+              </div>
+              <div>
+                <span className="settings-label">Alert events</span>
+                <strong>
+                  {storageStats
+                    ? storageStats.alert_events_count.toLocaleString()
+                    : storageLoading
+                      ? "…"
+                      : "0"}
+                </strong>
+              </div>
+            </div>
+            <label className="settings-field">
+              <span className="settings-label">Delete events older than</span>
+              <input
+                type="number"
+                className="settings-number"
+                min={1}
+                step={1}
+                value={pruneDays}
+                onChange={(e) => setPruneDays(e.target.value)}
+              />
+              <span className="settings-hint">
+                Removes fired alert history only. Alert rules, tags, device names, and webhook
+                settings are kept.
+              </span>
+            </label>
+            <div className="settings-actions">
+              <button
+                className="btn-small"
+                onClick={pruneOldEvents}
+                disabled={pruneDisabled}
+              >
+                {pruning ? "Pruning…" : "Prune old events"}
+              </button>
+            </div>
+            {storageError && <div className="settings-test fail">{storageError}</div>}
+            {pruneResult && <div className="settings-test ok">{pruneResult}</div>}
           </div>
         )}
       </div>

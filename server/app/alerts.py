@@ -203,6 +203,35 @@ def update_settings(
     return get_settings()
 
 
+# --------------------------------------------------------------------------
+# Storage / housekeeping
+# --------------------------------------------------------------------------
+
+def storage_stats() -> dict:
+    init_store()
+    with _connect() as conn:
+        alert_events_count = conn.execute("SELECT COUNT(*) FROM alert_events").fetchone()[0]
+    try:
+        db_size_bytes = os.path.getsize(STORE_PATH)
+    except FileNotFoundError:
+        db_size_bytes = 0
+    return {
+        "db_size_bytes": db_size_bytes,
+        "alert_events_count": alert_events_count,
+    }
+
+
+def prune_events(older_than_days: int) -> int:
+    if type(older_than_days) is not int or older_than_days < 1:
+        raise ValueError("older_than_days must be a positive integer")
+    init_store()
+    cutoff = int(time.time()) - older_than_days * 86400
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM alert_events WHERE created_at < ?", (cutoff,))
+        conn.commit()
+        return cur.rowcount
+
+
 def _summary(events: list[dict]) -> str:
     return "\n".join(f"[{e['severity']}] {e['message']}" for e in events)
 

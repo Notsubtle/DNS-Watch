@@ -487,6 +487,10 @@ class WebhookTest(BaseModel):
     format: str = "generic"
 
 
+class PruneEventsRequest(BaseModel):
+    older_than_days: int
+
+
 class DeviceNameUpdate(BaseModel):
     name: str
 
@@ -520,6 +524,19 @@ def api_update_settings(patch: SettingsUpdate):
 @app.post("/api/settings/test-webhook")
 def api_test_webhook(body: WebhookTest):
     return alerts.test_webhook(body.url, body.secret, body.format)
+
+
+@app.get("/api/storage-stats")
+def api_storage_stats():
+    return alerts.storage_stats()
+
+
+@app.post("/api/storage/prune-events")
+def api_prune_events(body: PruneEventsRequest):
+    try:
+        return {"deleted": alerts.prune_events(body.older_than_days)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/backup")
