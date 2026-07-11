@@ -157,6 +157,17 @@ export interface AlertRule {
   created_at: number;
 }
 
+// Preview of how many times a rule WOULD have fired recently, without
+// creating it (#54). Only supported for volume_threshold/domain_keyword/
+// device_quiet -- see alerts.backtest_rule's own module note for why the
+// other rule types 400 instead.
+export interface BacktestResult {
+  would_have_fired: number;
+  buckets_checked: number;
+  days: number;
+  sample_messages: string[];
+}
+
 export interface AlertEvent {
   id: number;
   rule_id: number | null;
@@ -475,6 +486,8 @@ export const api = {
   updateRule: (id: number, patch: { name?: string; enabled?: boolean; params?: Record<string, unknown> }) =>
     sendJson<AlertRule>(`/api/alert-rules/${id}`, "PATCH", patch),
   deleteRule: (id: number) => sendJson<{ deleted: number }>(`/api/alert-rules/${id}`, "DELETE"),
+  backtestRule: (r: { type: RuleType; params: Record<string, unknown>; days?: number }) =>
+    sendJson<BacktestResult>("/api/alert-rules/backtest", "POST", r),
 
   deviceNames: () => getJson<DeviceNameRow[]>("/api/device-names"),
   setDeviceName: (ip: string, name: string) =>

@@ -1,5 +1,11 @@
 import { Fragment, useEffect, useState } from "react";
-import { AlertRule, api, RuleType, Tag } from "../api";
+import { AlertRule, api, BacktestResult, RuleType, Tag } from "../api";
+
+// Mirrors alerts.BACKTESTABLE_TYPES -- kept in sync manually since it's a
+// tiny, rarely-changing set; the backend is still the source of truth (an
+// unsupported type just gets a 400 with an explanatory message instead of
+// the button being hidden, so this list drifting stale fails safely).
+const BACKTESTABLE_TYPES: RuleType[] = ["volume_threshold", "domain_keyword", "device_quiet"];
 
 const TYPE_LABELS: Record<RuleType, string> = {
   volume_threshold: "Query volume",
@@ -76,6 +82,11 @@ export default function RulesModal({ onClose, onChange, tags }: Props) {
   const [tagScope, setTagScope] = useState("");
   const [digestPeriod, setDigestPeriod] = useState<"daily" | "weekly">("daily");
 
+  // Backtest preview (#54).
+  const [backtesting, setBacktesting] = useState(false);
+  const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
+  const [backtestError, setBacktestError] = useState<string | null>(null);
+
   function load() {
     api.listRules().then(setRules).catch((e) => setError((e as Error).message));
   }
@@ -86,6 +97,13 @@ export default function RulesModal({ onClose, onChange, tags }: Props) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // A stale preview from a different rule type/config is misleading -- clear
+  // it as soon as the form changes underneath it.
+  useEffect(() => {
+    setBacktestResult(null);
+    setBacktestError(null);
+  }, [type]);
 
   function buildParams(): Record<string, unknown> {
     if (type === "volume_threshold") {
@@ -124,12 +142,27 @@ export default function RulesModal({ onClose, onChange, tags }: Props) {
       setName("");
       setKeyword("");
       setError(null);
+      setBacktestResult(null);
+      setBacktestError(null);
       load();
       onChange();
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function preview() {
+    setBacktesting(true);
+    setBacktestResult(null);
+    setBacktestError(null);
+    try {
+      setBacktestResult(await api.backtestRule({ type, params: buildParams(), days: 7 }));
+    } catch (e) {
+      setBacktestError((e as Error).message);
+    } finally {
+      setBacktesting(false);
     }
   }
 
@@ -326,10 +359,37 @@ export default function RulesModal({ onClose, onChange, tags }: Props) {
               </label>
             )}
 
+            {BACKTESTABLE_TYPES.includes(type) && (
+              <button
+                type="button"
+                className="btn-small"
+                onClick={preview}
+                disabled={backtesting}
+                title="Preview how many times this would have fired over the last 7 days, without saving it"
+              >
+                {backtesting ? "Checking…" : "Preview (7d)"}
+              </button>
+            )}
+
             <button type="submit" className="btn-primary" disabled={busy}>
               Add rule
             </button>
           </div>
+
+          {backtestError && <div className="error-banner">{backtestError}</div>}
+          {backtestResult && (
+            <div className="settings-test ok">
+              Would have fired <strong>{backtestResult.would_have_fired}</strong> time(s) in the
+              last {backtestResult.days} days.
+              {backtestResult.sample_messages.length > 0 && (
+                <ul className="backtest-samples">
+                  {backtestResult.sample_messages.map((m, i) => (
+                    <li key={i}>{m}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </form>
       </div>
     </div>

@@ -231,7 +231,10 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   together — a compound rule that fires only when BOTH are true within
   minutes of each other (e.g. a freshly-plugged-in gadget immediately
   phoning an unrecognized domain), a stronger signal than either "new
-  device" or "first-seen domain" alone. Rules are evaluated
+  device" or "first-seen domain" alone. Before saving a query-volume,
+  domain-keyword, or device-quiet rule, hit **Preview** to see how many
+  times it would have fired over the last 7 days — no more save/wait/adjust
+  against the live 60s eval loop to tune a threshold. Rules are evaluated
   **server-side on a timer** (`ALERT_EVAL_INTERVAL_SECONDS`, default 60), so alerts fire and webhooks
   send even with no dashboard open. Fired alerts show in the Alerts panel, each
   with a **snooze** control (1h/24h/7d) to silence just that specific
