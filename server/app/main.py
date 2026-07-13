@@ -488,9 +488,19 @@ def api_query_latency(
 
 @app.get("/api/anomalies")
 def api_anomalies():
-    """Automatic silent/spike/NXDOMAIN-rate detection against each client's
-    own 7-day baseline. Fixed thresholds, no params — see db.detect_anomalies()."""
+    """Automatic silent/spike/NXDOMAIN-rate/latency detection against each
+    client's own 7-day baseline. Fixed thresholds, no params — see
+    db.detect_anomalies()."""
     return db.detect_anomalies()
+
+
+@app.get("/api/latency-health")
+def api_latency_health():
+    """Network-wide resolver latency health (#4) -- whole-network baseline
+    vs. recent average reply_time. `null` means no signal yet (schema
+    without reply_time, or not enough samples), not "healthy" -- see
+    db.network_latency_health."""
+    return db.network_latency_health()
 
 
 @app.get("/api/domain-status-changes")

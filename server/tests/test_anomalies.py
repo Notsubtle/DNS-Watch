@@ -128,3 +128,11 @@ def test_api_anomalies_endpoint_returns_real_anomaly(ftl, client):
     assert hit is not None
     assert hit["kind"] == "silent"
     assert hit["name"] == "silent_via_api"
+
+
+def test_api_latency_health_endpoint_shape(client, ftl):
+    """#4: null (not a fake "healthy") when there's no reply_time signal at
+    all yet -- see db.network_latency_health's own None contract."""
+    resp = client.get("/api/latency-health")
+    assert resp.status_code == 200
+    assert resp.json() is None

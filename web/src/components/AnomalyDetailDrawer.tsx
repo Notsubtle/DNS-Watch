@@ -17,6 +17,7 @@ function fmtTime(ts: number): string {
 function describeKind(kind: Anomaly["kind"]): string {
   if (kind === "silent") return "Silent — no activity";
   if (kind === "nxdomain") return "NXDOMAIN spike — unusual failed-lookup rate";
+  if (kind === "latency") return "Latency — unusual resolution slowdown";
   return "Spike — unusual volume";
 }
 
@@ -87,7 +88,7 @@ export default function AnomalyDetailDrawer({ anomaly, onClose }: Props) {
             </button>
           </div>
 
-          <div className={`drawer-kind ${a.kind === "silent" ? "warning" : "critical"}`}>
+          <div className={`drawer-kind ${a.kind === "silent" || a.kind === "latency" ? "warning" : "critical"}`}>
             {describeKind(a.kind)}
           </div>
 
@@ -95,15 +96,18 @@ export default function AnomalyDetailDrawer({ anomaly, onClose }: Props) {
             <div>
               <span className="drawer-stat-label">Baseline</span>
               <span className="drawer-stat-value">
-                {a.kind === "nxdomain"
-                  ? `${a.baseline_avg}%`
-                  : `${a.baseline_avg}/hr (±${a.baseline_stddev})`}
+                {a.kind === "nxdomain" && `${a.baseline_avg}%`}
+                {a.kind === "latency" && `${a.baseline_avg}ms`}
+                {a.kind !== "nxdomain" && a.kind !== "latency" && `${a.baseline_avg}/hr (±${a.baseline_stddev})`}
               </span>
             </div>
             <div>
               <span className="drawer-stat-label">Current</span>
               <span className="drawer-stat-value">
-                {a.current_value}{a.kind === "nxdomain" ? "%" : "/hr"}
+                {a.current_value}
+                {a.kind === "nxdomain" && "%"}
+                {a.kind === "latency" && "ms"}
+                {a.kind !== "nxdomain" && a.kind !== "latency" && "/hr"}
               </span>
             </div>
           </div>

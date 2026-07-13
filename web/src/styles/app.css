@@ -985,6 +985,10 @@ tr:hover td {
 }
 
 .alert-dot.warning { background: var(--ink-amber); }
+
+.network-latency-warning {
+  color: var(--ink-amber);
+}
 .alert-dot.critical { background: var(--ink-red); }
 .alert-dot.info { background: var(--ink-blue); }
 

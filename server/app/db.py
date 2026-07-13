@@ -2771,6 +2771,7 @@ def detect_anomalies() -> list[dict]:
             })
 
     anomalies.extend(_nxdomain_anomalies(now, baseline_start))
+    anomalies.extend(_latency_anomalies(now, baseline_start))
     return anomalies
 
 
@@ -2856,6 +2857,137 @@ def _nxdomain_anomalies(now: int, baseline_start: int) -> list[dict]:
             "window_since": recent_start, "window_until": now,
         })
     return anomalies
+
+
+# Upstream resolver latency-degradation (#4/#4b in the feature backlog):
+# "Slowest domains" (slowest_domains above) is passive/on-demand; nothing
+# turns Pi-hole's own per-query `reply_time` into a proactive signal on its
+# own baseline. Same normalized-schema-only gating as slowest_domains/
+# NXDOMAIN above (`reply_time` doesn't exist on older layouts at all).
+#
+# Split into two surfaces rather than one, because they genuinely don't fit
+# the same shape:
+#   - #4b (per-client): fits detect_anomalies()'s per-client list perfectly
+#     -- a device whose OWN resolution latency just got worse (flaky
+#     resolver switch, one segment's reachability issue) -- so it's wired in
+#     as another `kind` here, exactly like NXDOMAIN-rate above.
+#   - #4 (network-wide): does NOT fit that shape at all -- it's a single
+#     network-wide health fact, not one entry per client. Deliberately kept
+#     OUT of detect_anomalies() and served by its own small
+#     network_latency_health() below / GET /api/latency-health instead of
+#     being shoehorned into a per-client list with a fake ip.
+LATENCY_WINDOW_HOURS = 3        # matches NXDOMAIN_WINDOW_HOURS/SILENT_WINDOW_HOURS
+LATENCY_MIN_BASELINE_COUNT = 20
+LATENCY_MIN_RECENT_COUNT = 10
+LATENCY_DEGRADED_MULTIPLIER = 2.0   # recent avg must clear 2x baseline...
+LATENCY_MIN_FLOOR_MS = 50.0         # ...AND clear an absolute 50ms floor, so a
+                                     # near-zero baseline (a client mostly
+                                     # cache-hitting) doesn't trip on a trivial
+                                     # few-ms blip.
+
+
+def _latency_anomalies(now: int, baseline_start: int) -> list[dict]:
+    """Per-client resolution-latency degradation (#4b): baseline (everything
+    from `baseline_start` up to the recent window) vs. recent
+    (LATENCY_WINDOW_HOURS) average `reply_time`. Same one-query,
+    CASE-partitioned shape as _nxdomain_anomalies -- see its own docstring
+    for why."""
+    if not detect_schema().has_id_storage:
+        return []
+    recent_start = now - LATENCY_WINDOW_HOURS * 3600
+    with _connect() as conn:
+        ipmap = _client_ip_map(conn)
+        namemap = _client_name_map(conn)
+        rows = conn.execute(
+            """
+            SELECT q.client AS cid,
+                   CASE WHEN q.timestamp >= ? THEN 1 ELSE 0 END AS is_recent,
+                   SUM(q.reply_time) AS total_reply, COUNT(*) AS total
+            FROM query_storage q
+            WHERE q.timestamp >= ? AND q.reply_time IS NOT NULL
+            GROUP BY q.client, is_recent
+            """,
+            [recent_start, baseline_start],
+        ).fetchall()
+
+    per_client: dict[str, dict[str, float]] = {}
+    for r in rows:
+        ip = _resolve_client_value(r["cid"], ipmap)
+        if ip is None:
+            continue
+        c = per_client.setdefault(
+            ip, {"baseline_reply": 0.0, "baseline_total": 0, "recent_reply": 0.0, "recent_total": 0}
+        )
+        if r["is_recent"]:
+            c["recent_reply"] += r["total_reply"] or 0.0
+            c["recent_total"] += r["total"]
+        else:
+            c["baseline_reply"] += r["total_reply"] or 0.0
+            c["baseline_total"] += r["total"]
+
+    resolved = resolve.get_names()
+    manual = names.get_names()
+    anomalies: list[dict] = []
+    for ip, c in per_client.items():
+        if c["baseline_total"] < LATENCY_MIN_BASELINE_COUNT or c["recent_total"] < LATENCY_MIN_RECENT_COUNT:
+            continue
+        baseline_ms = 1000 * c["baseline_reply"] / c["baseline_total"]
+        recent_ms = 1000 * c["recent_reply"] / c["recent_total"]
+        threshold = max(baseline_ms * LATENCY_DEGRADED_MULTIPLIER, LATENCY_MIN_FLOOR_MS)
+        if recent_ms <= threshold:
+            continue
+        name = _display_name(namemap.get(ip), ip, resolved, manual)
+        anomalies.append({
+            "ip": ip, "name": name, "kind": "latency",
+            "baseline_avg": round(baseline_ms, 1),
+            "baseline_stddev": 0.0,  # not applicable to an average-latency metric
+            "current_value": round(recent_ms, 1),
+            "window_since": recent_start, "window_until": now,
+        })
+    return anomalies
+
+
+def network_latency_health(baseline_days: int = BASELINE_DAYS) -> dict | None:
+    """Network-wide resolver latency health (#4): whole-network baseline vs.
+    recent average `reply_time` -- see the module note above for why this is
+    NOT part of detect_anomalies()'s per-client list. Returns None when the
+    schema doesn't carry `reply_time` at all, or when either window doesn't
+    have enough samples to trust yet -- callers must treat that as "no
+    signal", not "not degraded"."""
+    if not detect_schema().has_id_storage:
+        return None
+    now = int(time.time())
+    recent_start = now - LATENCY_WINDOW_HOURS * 3600
+    baseline_start = now - baseline_days * 86400
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT CASE WHEN timestamp >= ? THEN 1 ELSE 0 END AS is_recent,
+                   SUM(reply_time) AS total_reply, COUNT(*) AS total
+            FROM query_storage
+            WHERE timestamp >= ? AND reply_time IS NOT NULL
+            GROUP BY is_recent
+            """,
+            [recent_start, baseline_start],
+        ).fetchall()
+    baseline_total = baseline_reply = recent_total = recent_reply = 0.0
+    for r in rows:
+        if r["is_recent"]:
+            recent_reply, recent_total = r["total_reply"] or 0.0, r["total"]
+        else:
+            baseline_reply, baseline_total = r["total_reply"] or 0.0, r["total"]
+    if baseline_total < LATENCY_MIN_BASELINE_COUNT or recent_total < LATENCY_MIN_RECENT_COUNT:
+        return None
+    baseline_ms = round(1000 * baseline_reply / baseline_total, 1)
+    recent_ms = round(1000 * recent_reply / recent_total, 1)
+    threshold = max(baseline_ms * LATENCY_DEGRADED_MULTIPLIER, LATENCY_MIN_FLOOR_MS)
+    return {
+        "baseline_avg_ms": baseline_ms,
+        "recent_avg_ms": recent_ms,
+        "degraded": recent_ms > threshold,
+        "window_since": recent_start,
+        "window_until": now,
+    }
 
 
 # Shared presence qualifier for "this client went quiet" events (#6/#7),

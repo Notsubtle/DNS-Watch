@@ -317,9 +317,10 @@ export interface Anomaly {
   name: string;
   // "nxdomain": baseline_avg/current_value are a NXDOMAIN-rate PERCENTAGE
   // (0-100), not a queries/hr count like "silent"/"spike" use -- see
-  // db._nxdomain_anomalies(). baseline_stddev is always 0 for this kind
-  // (not applicable to a rate metric).
-  kind: "silent" | "spike" | "nxdomain";
+  // db._nxdomain_anomalies(). "latency" (#4b): baseline_avg/current_value are
+  // milliseconds -- see db._latency_anomalies(). Both leave baseline_stddev
+  // at 0 (not applicable to either metric).
+  kind: "silent" | "spike" | "nxdomain" | "latency";
   baseline_avg: number;
   baseline_stddev: number;
   current_value: number;
@@ -329,6 +330,16 @@ export interface Anomaly {
   // device_quiet alert rule would attach for this client, so the Alerts and
   // Anomalies panels never disagree about the same client going quiet.
   presence_note?: string;
+}
+
+// Network-wide resolver latency health (#4) -- deliberately NOT part of the
+// per-client Anomaly list above; see db.network_latency_health's module note.
+export interface LatencyHealth {
+  baseline_avg_ms: number;
+  recent_avg_ms: number;
+  degraded: boolean;
+  window_since: number;
+  window_until: number;
 }
 
 export type WebhookFormat = "generic" | "slack" | "discord";
@@ -531,6 +542,7 @@ export const api = {
     })}`,
 
   anomalies: () => getJson<Anomaly[]>("/api/anomalies"),
+  latencyHealth: () => getJson<LatencyHealth | null>("/api/latency-health"),
 
   // Underlying query events behind a single anomaly: this client, scoped to
   // the exact baseline-deviation window the anomaly was computed over.
