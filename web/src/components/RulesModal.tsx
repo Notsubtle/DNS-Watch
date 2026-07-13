@@ -16,6 +16,7 @@ const TYPE_LABELS: Record<RuleType, string> = {
   doh_provider: "Known DoH/DoT provider query",
   digest: "Periodic digest",
   first_seen_domain: "First-seen domain",
+  client_first_seen_domain: "First-seen domain for this device",
   correlated_new_device_domain: "New device + first-seen domain",
   unusual_query_type: "Unusual query type",
 };
@@ -39,6 +40,9 @@ function describe(rule: AlertRule): string {
   }
   if (rule.type === "first_seen_domain") {
     return `a domain no client has ever queried before, seen within ${p.window_minutes ?? 1440}m`;
+  }
+  if (rule.type === "client_first_seen_domain") {
+    return `a device queries a domain it has never queried before (even if other devices have), within ${p.window_minutes ?? 1440}m`;
   }
   if (rule.type === "correlated_new_device_domain") {
     return `a new device queries a first-seen domain within ${p.window_minutes ?? 15}m of joining`;
@@ -119,6 +123,7 @@ export default function RulesModal({ onClose, onChange, tags }: Props) {
       type === "new_vendor" ||
       type === "doh_provider" ||
       type === "first_seen_domain" ||
+      type === "client_first_seen_domain" ||
       type === "correlated_new_device_domain" ||
       type === "unusual_query_type"
     ) {

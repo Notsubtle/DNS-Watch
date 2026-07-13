@@ -119,3 +119,22 @@ def test_api_device_names_includes_stale_manual_only_entries(client, ftl):
     assert rows["10.0.0.250"]["manual_name"] == "Old Printer"
     assert rows["10.0.0.250"]["seen"] is False
     assert rows["10.0.0.250"]["query_count"] == 0
+
+
+def test_api_device_new_domains_not_ready_before_backfill(client, ftl):
+    """#1: the rollup-backed endpoint reports ready: false, not an empty list
+    passed off as "no new domains", before the rollup has ever run."""
+    resp = client.get("/api/device-names/192.168.1.13/new-domains")
+    assert resp.status_code == 200
+    assert resp.json() == {"ready": False, "domains": []}
+
+
+def test_api_device_new_domains_after_backfill(client, ftl):
+    from app import rollups
+
+    rollups.refresh_rollups()
+    resp = client.get("/api/device-names/192.168.1.13/new-domains")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ready"] is True
+    assert all(d["ip"] == "192.168.1.13" for d in body["domains"])

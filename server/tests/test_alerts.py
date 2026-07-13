@@ -220,6 +220,66 @@ def test_first_seen_domain_rule_noop_before_rollup_backfilled(client, ftl):
     assert not any(e["type"] == "first_seen_domain" for e in events)
 
 
+def test_client_first_seen_domain_rule(client, ftl):
+    """#1: per-client sibling of first_seen_domain -- fires when a SPECIFIC
+    client queries a domain it has never queried before, even reusing a
+    domain that already exists in build_ftl's fixture data (unlike
+    first_seen_domain, this must NOT require the domain to be network-wide
+    new). Backed by rollups.client_new_domains()."""
+    from app import rollups
+    import sqlite3
+
+    rollups.refresh_rollups()  # backfill everything build_ftl already seeded
+
+    now = int(time.time())
+    reused_domain = "reused-for-this-client.example"
+    target_ip = "192.168.1.10"
+    conn = sqlite3.connect(ftl["path"])
+    if ftl["schema"] == "new":
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,1)",
+            (now, 1, 2, reused_domain),
+        )
+    elif ftl["schema"] == "idstore":
+        from conftest import _idstore_client_id, _idstore_domain_id
+        cur = conn.cursor()
+        cid = _idstore_client_id(cur, target_ip, "laptop")
+        did = _idstore_domain_id(cur, reused_domain)
+        conn.execute(
+            "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (now, 1, 2, did, cid),
+        )
+    else:  # "old" / "real"
+        ts = float(now) if ftl["schema"] == "real" else now
+        conn.execute(
+            "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+            (ts, 1, 2, reused_domain, target_ip),
+        )
+    conn.commit()
+    conn.close()
+
+    rollups.refresh_rollups()  # pick up the new (client, domain) pair
+
+    client.post("/api/alert-rules", json={
+        "name": "ClientNewDomain", "type": "client_first_seen_domain",
+        "params": {"window_minutes": 60}})
+    events = client.get("/api/alerts").json()["events"]
+    dom_events = [e for e in events if e["type"] == "client_first_seen_domain"]
+
+    assert dom_events and any(reused_domain in e["message"] for e in dom_events)
+
+
+def test_client_first_seen_domain_rule_noop_before_rollup_backfilled(client, ftl):
+    """Same None-vs-[] contract as first_seen_domain: before the rollup has
+    ever been backfilled, rollups.client_new_domains() returns None, and the
+    rule must treat that as "no signal yet"."""
+    client.post("/api/alert-rules", json={
+        "name": "ClientNewDomain", "type": "client_first_seen_domain",
+        "params": {"window_minutes": 600000}})
+    events = client.get("/api/alerts").json()["events"]
+    assert not any(e["type"] == "client_first_seen_domain" for e in events)
+
+
 def test_new_vendor_rule(client, ftl):
     """#12: complementary to new_device, but keyed on vendor rather than raw
     IP/first-seen. Only "real"/"idstore" schemas carry vendor data at all

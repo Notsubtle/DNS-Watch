@@ -146,6 +146,7 @@ def init_rollup_store() -> None:
                 ip TEXT NOT NULL,
                 domain TEXT NOT NULL,
                 count INTEGER NOT NULL DEFAULT 0,
+                first_seen INTEGER,
                 PRIMARY KEY (ip, domain)
             );
             CREATE TABLE IF NOT EXISTS client_activity_rollup (
@@ -229,6 +230,16 @@ def init_rollup_store() -> None:
             conn.execute(
                 "ALTER TABLE rollup_meta ADD COLUMN reconcile_in_progress INTEGER NOT NULL DEFAULT 0"
             )
+        # client_domain_rollup predates first_seen (per-client first-seen-domain
+        # detection, #1 in the feature backlog) -- same ALTER-on-existing-table
+        # pattern as unknown_count/reconcile_in_progress above. Rows that
+        # existed before this column was added get first_seen = NULL (their
+        # true first-seen time was never recorded); the next reconcile_rollups()
+        # full rebuild backfills them correctly since it replays every row from
+        # scratch through the same _apply() path new rows take.
+        cdr_cols = {r["name"] for r in conn.execute("PRAGMA table_info(client_domain_rollup)")}
+        if "first_seen" not in cdr_cols:
+            conn.execute("ALTER TABLE client_domain_rollup ADD COLUMN first_seen INTEGER")
         conn.commit()
 
 
@@ -379,6 +390,10 @@ class _Deltas:
         self.domain_first_seen: dict[str, int] = {}
         # (domain, day) -> [allowed, blocked] -- see domain_status_daily above.
         self.domain_daily: dict[tuple[str, str], list[int]] = {}
+        # (ip, domain) -> first_seen (#1, per-client sibling of domain_first_seen
+        # above) -- same setdefault-within-a-batch, ascending-batches-overall
+        # reasoning applies, just scoped to one client instead of network-wide.
+        self.client_domain_first_seen: dict[tuple[str, str], int] = {}
 
     def add(self, row: dict) -> None:
         ts = row["timestamp"]
@@ -438,6 +453,7 @@ class _Deltas:
             if domain is not None:
                 key = (ip, domain)
                 self.client_domain[key] = self.client_domain.get(key, 0) + 1
+                self.client_domain_first_seen.setdefault(key, ic)
 
 
 def _apply(conn: sqlite3.Connection, deltas: _Deltas) -> None:
@@ -478,10 +494,16 @@ def _apply(conn: sqlite3.Connection, deltas: _Deltas) -> None:
              for ip, c in deltas.client.items()],
         )
     if deltas.client_domain:
+        # first_seen deliberately excluded from ON CONFLICT's SET clause -- it
+        # is only ever written on the INSERT branch (this (ip, domain) pair's
+        # first appearance), never touched again on later conflicts, matching
+        # seen_domains' INSERT OR IGNORE semantics but expressed as a partial
+        # UPDATE since this table's count column DOES need updating each time.
         conn.executemany(
-            "INSERT INTO client_domain_rollup (ip, domain, count) VALUES (?, ?, ?) "
+            "INSERT INTO client_domain_rollup (ip, domain, count, first_seen) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(ip, domain) DO UPDATE SET count = count + excluded.count",
-            [(ip, dom, n) for (ip, dom), n in deltas.client_domain.items()],
+            [(ip, dom, n, deltas.client_domain_first_seen[(ip, dom)])
+             for (ip, dom), n in deltas.client_domain.items()],
         )
     if deltas.client_activity:
         conn.executemany(
@@ -1013,6 +1035,39 @@ def new_domains(after_ts: int) -> list[dict] | None:
             [after_ts],
         ).fetchall()
     return [{"domain": r["domain"], "first_seen": r["first_seen"]} for r in rows]
+
+
+def client_new_domains(after_ts: int, ip: str | None = None, limit: int = 200) -> list[dict] | None:
+    """Per-client first-seen-domain (#1): (ip, domain, first_seen) rows where
+    THIS specific client queried this domain for the first time at/after
+    `after_ts`, regardless of whether some other client queried it long ago --
+    the per-device sibling of new_domains() above, which only answers "has
+    ANY client ever queried this domain before". A device quietly reaching out
+    to a domain nothing else on the network has ever touched, even a boring
+    one, is a real per-device signal that new_domains() can't see once that
+    domain is no longer network-wide-new.
+
+    Same None-vs-[] contract as new_domains(): None means the rollup isn't
+    trustworthy yet (not backfilled / mid-reconcile), and must be treated as
+    "no signal this tick" by callers, never as "no new domains for anyone".
+    """
+    init_rollup_store()
+    with _connect() as conn:
+        if not _rollups_ready(conn):
+            return None
+        if ip is not None:
+            rows = conn.execute(
+                "SELECT ip, domain, first_seen FROM client_domain_rollup "
+                "WHERE ip = ? AND first_seen >= ? ORDER BY first_seen DESC LIMIT ?",
+                [ip, after_ts, limit],
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT ip, domain, first_seen FROM client_domain_rollup "
+                "WHERE first_seen >= ? ORDER BY first_seen DESC LIMIT ?",
+                [after_ts, limit],
+            ).fetchall()
+    return [{"ip": r["ip"], "domain": r["domain"], "first_seen": r["first_seen"]} for r in rows]
 
 
 # --------------------------------------------------------------------------

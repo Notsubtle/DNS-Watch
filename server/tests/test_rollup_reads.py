@@ -300,6 +300,49 @@ def test_new_domains_reflects_a_genuinely_new_domain_after_refresh(idb, rstore):
     assert after["brand-new.example"] == later
 
 
+def test_client_new_domains_matches_ground_truth(idb, rstore):
+    """#1: rollups.client_new_domains() is a per-(client, domain) first-seen
+    table maintained incrementally (client_domain_rollup.first_seen), verified
+    against a raw MIN(timestamp) GROUP BY (client, domain) over query_storage."""
+    _build_idstore_with_traps(idb, _NOW - 5 * 86400, _NOW)
+    rollups.refresh_rollups()
+
+    conn = sqlite3.connect(idb)
+    conn.row_factory = sqlite3.Row
+    truth = {
+        (r["ip"], r["domain"]): r["fs"]
+        for r in conn.execute(
+            "SELECT c.ip AS ip, d.domain AS domain, MIN(q.timestamp) AS fs "
+            "FROM query_storage q "
+            "JOIN domain_by_id d ON d.id = q.domain "
+            "JOIN client_by_id c ON c.id = q.client "
+            "GROUP BY c.ip, d.domain"
+        )
+        if r["ip"] is not None  # client_domain_rollup only tracks resolvable clients
+    }
+
+    all_new = {(r["ip"], r["domain"]): r["first_seen"] for r in rollups.client_new_domains(0)}
+    assert all_new == {k: int(ts) for k, ts in truth.items()}
+
+    assert rollups.client_new_domains(_NOW + 1) == []
+
+    cutoff = _NOW - 2 * 86400
+    expected_mid = {k for k, ts in truth.items() if ts >= cutoff}
+    got_mid = {(r["ip"], r["domain"]) for r in rollups.client_new_domains(cutoff)}
+    assert got_mid == expected_mid
+
+    # ip filter scopes to exactly that client's rows.
+    one_ip = "192.168.0.10"
+    scoped = rollups.client_new_domains(0, ip=one_ip)
+    assert scoped == [r for r in rollups.client_new_domains(0) if r["ip"] == one_ip]
+    assert scoped  # non-vacuous given the seeded dataset
+
+
+def test_client_new_domains_not_ready_before_backfill(idb, rstore):
+    _build_idstore_with_traps(idb, _NOW - 5 * 86400, _NOW)
+    assert rollups.client_new_domains(0) is None  # never refreshed -- not ready
+
+
 # --------------------------------------------------------------------------
 # Cross-schema agreement: read_* == the direct scan on every schema shape.
 #

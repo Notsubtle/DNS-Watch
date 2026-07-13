@@ -38,6 +38,7 @@ VALID_TYPES = {
     "volume_threshold", "new_device", "domain_keyword", "device_quiet",
     "new_vendor", "doh_provider", "digest", "first_seen_domain",
     "correlated_new_device_domain", "unusual_query_type",
+    "client_first_seen_domain",
 }
 
 # Webhook payload shapes. "generic" is DNS Watch's own JSON; "slack"/"discord"
@@ -57,6 +58,7 @@ DEFAULT_COOLDOWN = {
     "new_vendor": 86400,
     "doh_provider": 86400,
     "first_seen_domain": 86400,
+    "client_first_seen_domain": 86400,
     "correlated_new_device_domain": 86400,
     "unusual_query_type": 86400,
     # No entry for "digest": its firing is gated on a calendar-period
@@ -711,6 +713,29 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
                   f"New domain seen for the first time: {d['domain']}",
                   f"domain:{rule['id']}:{d['domain']}", domain=d["domain"])
 
+    elif rule["type"] == "client_first_seen_domain":
+        # Per-client sibling of first_seen_domain (#1 in the feature backlog):
+        # fires when a specific client queries a domain IT has never queried
+        # before, even if other clients queried that same domain long ago --
+        # first_seen_domain alone goes permanently quiet on a domain the
+        # instant any one device queries it, so a second device later
+        # reaching out to that same domain for the first time (a much
+        # stronger per-device signal, e.g. "this printer just started talking
+        # to a tracking domain") would otherwise be invisible. Backed by
+        # rollups.client_new_domains(), the per-client extension of
+        # client_domain_rollup -- same None-vs-[] "rollup not ready" contract
+        # as first_seen_domain above.
+        window_min = int(p.get("window_minutes", 1440))
+        since = now - window_min * 60
+        new_doms = rollups.client_new_domains(since)
+        if new_doms is None:
+            return
+        for d in new_doms:
+            _emit(pending, rule, "info",
+                  f"{d['ip']} queried a domain it has never queried before: {d['domain']}",
+                  f"clientdomain:{rule['id']}:{d['ip']}:{d['domain']}",
+                  client_ip=d["ip"], domain=d["domain"])
+
     elif rule["type"] == "correlated_new_device_domain":
         # A brand-new device querying a domain no client has EVER queried
         # before, close together in time, is a much stronger signal than
@@ -818,8 +843,9 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
 # Only supported for rule types whose condition decomposes into fixed-size,
 # independently-checkable time windows: volume_threshold, domain_keyword,
 # device_quiet. The other rule types (new_device, new_vendor,
-# first_seen_domain, doh_provider, correlated_new_device_domain, digest) are
-# keyed on "did X newly appear" -- a single point-in-time fact evaluated
+# first_seen_domain, client_first_seen_domain, doh_provider,
+# correlated_new_device_domain, digest) are keyed on "did X newly appear" --
+# a single point-in-time fact evaluated
 # against live state (new_clients()/new_domains()'s "since" cursor), not a
 # repeatable per-window condition -- there's no honest way to answer "how many
 # times would this have fired" for those without re-deriving a full synthetic

@@ -506,6 +506,20 @@ def api_period_comparison(days: int = Query(7, ge=1, le=90)):
     return {"ready": True, **result}
 
 
+@app.get("/api/device-names/{ip}/new-domains")
+def api_device_new_domains(ip: str, days: int = Query(30, ge=1, le=365), limit: int = Query(50, ge=1, le=200)):
+    """Domains THIS device has queried for the first time in the last `days`
+    days (#1 in the feature backlog) -- the per-client sibling of
+    domain-status-changes above. Rollup-only, same `ready: false` contract as
+    every other rollups.py read: it means "not backfilled yet", not "no new
+    domains for this device". See rollups.client_new_domains."""
+    since = int(time.time()) - days * 86400
+    domains = rollups.client_new_domains(since, ip=ip, limit=limit)
+    if domains is None:
+        return {"ready": False, "domains": []}
+    return {"ready": True, "domains": domains}
+
+
 @app.get("/api/client-activity")
 def api_client_activity(
     range: str | None = "1h",

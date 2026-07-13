@@ -199,6 +199,20 @@ export interface NameChangeEntry {
   new_name: string | null;
 }
 
+// Per-client first-seen-domain (#1): domains this specific device has
+// queried for the first time recently, even if other clients queried them
+// long ago -- see rollups.client_new_domains.
+export interface DeviceNewDomain {
+  ip: string;
+  domain: string;
+  first_seen: number;
+}
+
+export interface DeviceNewDomains {
+  ready: boolean;
+  domains: DeviceNewDomain[];
+}
+
 export type RuleType =
   | "volume_threshold"
   | "new_device"
@@ -208,6 +222,7 @@ export type RuleType =
   | "doh_provider"
   | "digest"
   | "first_seen_domain"
+  | "client_first_seen_domain"
   | "correlated_new_device_domain"
   | "unusual_query_type";
 
@@ -569,6 +584,8 @@ export const api = {
     sendJson<{ deleted: string }>(`/api/device-names/${encodeURIComponent(ip)}`, "DELETE"),
   deviceNameHistory: (ip: string) =>
     getJson<NameChangeEntry[]>(`/api/device-names/${encodeURIComponent(ip)}/history`),
+  deviceNewDomains: (ip: string) =>
+    getJson<DeviceNewDomains>(`/api/device-names/${encodeURIComponent(ip)}/new-domains`),
 
   listVendors: () => getJson<Vendor[]>("/api/vendors"),
 
