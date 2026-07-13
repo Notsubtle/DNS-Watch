@@ -361,6 +361,13 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   gap. It only looks at the `Origin`/`Referer` headers browsers already send; normal
   use of the dashboard, and non-browser clients that send neither header, are
   unaffected.
+- **No cross-origin API access by default** — the API never sends CORS headers
+  unless you set `DNSWATCH_CORS_ORIGINS` (comma-separated list, see `.env.example`),
+  so no other website your browser has open can read your DNS history via
+  `fetch()`. The dashboard itself never needs this: it's always same-origin in
+  production, and proxied same-origin by Vite's dev server in UAT/dev. This is a
+  separate protection from `DNSWATCH_AUTH_PASSWORD` above, not a substitute for it —
+  set both if the dashboard is reachable by anyone you don't trust on your LAN.
 
 ## Analysis tabs
 
