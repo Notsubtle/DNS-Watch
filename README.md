@@ -38,22 +38,29 @@ go looking:
 - **Security hobbyists** — get flagged when a **new/unknown device** joins (including
   by **vendor**: a device whose manufacturer can't be identified at all, or the first
   device on your network from a brand you've never seen before), when a **domain no
-  client has ever queried before** shows up network-wide, when a device queries a
-  **known DoH/DoT provider** (a signal it may be setting up a path around Pi-hole),
-  when a device's query volume **spikes** (possible malware or DNS exfiltration), or
-  when a normally-active device **goes quiet** (offline or tampered with). Spikes and
-  silences are also surfaced **automatically** in a **Network Anomalies** panel,
-  measured against each device's *own* 7-day baseline — no rule setup required.
+  client has ever queried before** shows up network-wide (or, per-device, a domain
+  *this specific device* has never queried, even one other devices already talk to),
+  when a device queries a **known DoH/DoT provider** (a signal it may be setting up a
+  path around Pi-hole), when a device's query volume **spikes** (possible malware or
+  DNS exfiltration), or when a normally-active device **goes quiet** (offline or
+  tampered with). Spikes, silences, a jump in a device's own **NXDOMAIN (failed
+  lookup) rate**, and a jump in its own **resolver latency** are also surfaced
+  **automatically** in a **Network Anomalies** panel, measured against each device's
+  *own* 7-day baseline — no rule setup required.
 - **Tinkerers** — a filterable, per-client live log for debugging a chatty device or
-  a false-positive block.
+  a false-positive block, with a soft **high-entropy** badge on random-looking
+  domains as they scroll by.
 - **Investigators** — when something looks off, dedicated tools to dig in: a live
   **"tail -f" stream** to watch queries scroll by in real time (with your own colour
   highlight rules), a **blocklist simulator** to measure what a Pi-hole-style regex
-  *would* have blocked over the last 7 days before you commit it, a per-client
-  **activity heatmap** that exposes background chatter during the hours a device is
-  supposed to be idle, and a **domain fan-out** view that surfaces several devices
-  hitting the same domain within the same short window — synchronized beaconing a
-  per-client view can't show on its own.
+  *would* have blocked over the last 7 days before you commit it, a per-client (or
+  whole-**tag**) **activity heatmap** that exposes background chatter during the
+  hours a device is supposed to be idle, a **domain fan-out** view that surfaces
+  several devices hitting the same domain within the same short window —
+  synchronized beaconing a per-client view can't show on its own — a **tunneling
+  detector** that flags a device hammering an unusual number of distinct subdomains
+  under one parent domain (the classic DNS-tunneling/exfiltration shape), and a
+  **Compare Clients** tab to put up to three devices' full profiles side by side.
 
 The feature that makes it more than a prettier Pi-hole dashboard is **headless
 alerting**: rules are evaluated server-side on a timer and pushed out via webhook,
@@ -188,9 +195,10 @@ npm run dev    # http://localhost:5173, proxies /api to :8090
 ## What you get
 
 The app is organised into tabs: a **Dashboard** (everything below down to
-"Optional login"), plus five focused analysis views — **Live Stream**,
-**Blocklist Simulator**, **Client Heatmaps**, **Domain Fan-out**, and
-**Trends** — described under "Analysis tabs" further down.
+"Optional login"), plus seven focused analysis views — **Live Stream**,
+**Blocklist Simulator**, **Client Heatmaps**, **Domain Fan-out**,
+**Tunneling Detector**, **Compare Clients**, and **Trends** — described
+under "Analysis tabs" further down.
 
 - **Live query table** — every DNS query, auto-refreshing, with client, domain,
   status (allowed/blocked), and timestamp. Scrolls internally within a fixed-height
@@ -214,6 +222,17 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   **detail view** (its own volume chart, top domains, query types, first/last seen).
 - **Top blocked per client** — a ranked dashboard-wide view of which blocked
   domains are hitting which clients most often, scoped by the same filters.
+- **Client detail extras** — beyond the volume chart/top domains/query types
+  described above, a device's detail view also shows what **% of its distinct
+  domains look high-entropy** (random-looking domain names, Shannon entropy
+  over the part in front of the registered parent domain — a soft DGA/C2
+  signal, deliberately never a hard alert: plenty of ordinary CDN/content-hash
+  domains look "random" too), a **"New for this device"** panel listing
+  domains *this specific device* queried for the first time in the last 30
+  days, and a unified **Timeline** merging its name-change history and every
+  alert it has ever fired, most-recent-first, so you don't have to
+  cross-reference two separate places to answer "what's changed about this
+  device lately?"
 - **Query-volume chart** — a time-series of allowed vs. blocked queries across the
   selected range, bucketed and hoverable.
 - **Query-type breakdown** — A / AAAA / HTTPS / PTR / … distribution.
@@ -236,11 +255,16 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   together — a compound rule that fires only when BOTH are true within
   minutes of each other (e.g. a freshly-plugged-in gadget immediately
   phoning an unrecognized domain), a stronger signal than either "new
-  device" or "first-seen domain" alone, or an **unusual query type** — a
+  device" or "first-seen domain" alone, an **unusual query type** — a
   client using a DNS query type (TXT, ANY, ...) it has never used before, a
   shift in *what kind* of query a device makes rather than how many, the
-  kind of signal a pure query-volume rule can't see. Before saving a
-  query-volume, domain-keyword, or device-quiet rule, hit **Preview** to see
+  kind of signal a pure query-volume rule can't see — or a **per-device
+  first-seen domain**: the device-scoped sibling of the network-wide
+  first-seen-domain rule above, firing when *this specific device* queries a
+  domain it personally has never queried before, even one every other device
+  already talks to (which the network-wide rule goes permanently quiet on
+  after any one client hits it once). Before saving a query-volume,
+  domain-keyword, or device-quiet rule, hit **Preview** to see
   how many times it would have fired over the last 7 days — no more
   save/wait/adjust against the live 60s eval loop to tune a threshold. Rules
   are evaluated
@@ -248,7 +272,10 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   send even with no dashboard open. Fired alerts show in the Alerts panel, each
   with a **snooze** control (1h/24h/7d) to silence just that specific
   recurrence — e.g. one device's new-vendor alert — without disabling the rule
-  for every other client or domain it also watches. An alert about a specific
+  for every other client or domain it also watches, or a **Suppress** button to
+  silence that rule for this exact device/domain **permanently**, for when a
+  recurring alert turns out to be a known false positive rather than something
+  worth re-snoozing every week. An alert about a specific
   device or domain is also a **deep-link** — click it to jump straight to
   that client's detail view or that domain's drill-down, instead of
   re-finding it yourself. The rules modal groups saved rules by type and
@@ -266,7 +293,14 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   restoring onto a new install.
 - **Storage housekeeping** — **⚙ Settings** shows DNS Watch's writable database
   size and alert event count, with a prune-by-age control for deleting old fired
-  alert history without touching rules, tags, device names, or webhook settings.
+  alert history without touching rules, tags, device names, or webhook settings. A
+  second, separate prune-by-age control does the same for the rollup tables behind
+  the **first-seen domain** feature (domain-history and domain-status-by-day) —
+  these are the only rollup tables that grow unboundedly with distinct-domain
+  count rather than staying client-sized, so they're the ones that actually
+  benefit from a manual trim on a long-running install. Both are opt-in, run
+  on-demand, and never touch the live per-client rollups the dashboard's "All"
+  range depends on.
 - **Known DoH/DoT provider query** — flags when a client queries a well-known
   DNS-over-HTTPS/TLS provider's own domain (Cloudflare, Google, OpenDNS, Quad9,
   NextDNS, AdGuard DNS, and a few others — a small maintained list, not
@@ -312,7 +346,11 @@ The app is organised into tabs: a **Dashboard** (everything below down to
      Pi-hole/reverse-DNS already call it — with an editable name field. A name you
      set here overrides everything else, everywhere in the dashboard, and stays
      visible (and deletable) even if that device goes quiet, so a stale override
-     never lingers unnoticed.
+     never lingers unnoticed. Select several devices at once (checkboxes) to
+     **bulk-apply** a tag or a shared name to all of them in one action instead of
+     repeating it per device — useful right after adding a batch of new IoT
+     gadgets. If one device in the batch fails, the rest still go through; you're
+     told exactly which ones failed so you can retry just those.
   2. **A background reverse-DNS (PTR) guess**, for anything you haven't named
      yourself. Results are cached with automatic backoff on IPs that never answer,
      so a permanently silent device isn't re-queried every tick. In practice this
@@ -351,17 +389,23 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   randomized/locally-administered MAC (a privacy feature on most modern mobile OSes),
   which has no vendor in any registry by design.
 - **Automatic anomaly detection** — a **Network Anomalies** panel flags clients that
-  have gone unexpectedly **silent**, are **spiking**, or whose **NXDOMAIN (failed
-  lookup) rate** just jumped well above their own norm — the last one is the
-  classic domain-generation-algorithm/dead-C2 signature, and unlike every other
-  rule here it looks at the *answer* to a query rather than its volume, type, or
-  domain name. All three are judged against each client's *own* rolling 7-day
+  have gone unexpectedly **silent**, are **spiking**, whose **NXDOMAIN (failed
+  lookup) rate** just jumped well above their own norm — the classic
+  domain-generation-algorithm/dead-C2 signature, and unlike most other rules here
+  it looks at the *answer* to a query rather than its volume, type, or domain
+  name — or whose own **resolver latency** just degraded well above its own norm
+  (a flaky resolver switch, or a segment reachability issue specific to that
+  device). All four are judged against each client's *own* rolling 7-day
   baseline (fixed thresholds, always on — distinct from the configurable Alert
-  rules above, and needing no setup). The NXDOMAIN check only runs on Pi-hole's
-  newer on-disk layout, which is the only one that records a per-query reply
-  type at all. Click a row to jump the dashboard to the window it fired in, or
+  rules above, and needing no setup). NXDOMAIN and latency both only run on
+  Pi-hole's newer on-disk layout, the only one that records a per-query reply
+  type/timing at all. Click a row to jump the dashboard to the window it fired in, or
   click the **IP address** itself to open a side-panel drill-down showing the
-  anomaly's baseline vs. current values and the actual DNS queries behind it.
+  anomaly's baseline vs. current values and the actual DNS queries behind it. A
+  separate, **network-wide** latency-health check (same idea, but one fact for
+  the whole network rather than per-client) surfaces as its own banner at the
+  top of this panel when the network as a whole is resolving slower than its
+  own 7-day baseline.
 - **Optional login** — set `DNSWATCH_AUTH_PASSWORD` (or `DNSWATCH_AUTH_PASSWORD_FILE`
   to read it from a mounted file/Docker secret instead — see `.env.example`) to gate
   the whole app behind HTTP Basic auth. Left unset, it's open on your LAN as before.
@@ -382,7 +426,7 @@ The app is organised into tabs: a **Dashboard** (everything below down to
 
 ## Analysis tabs
 
-Beyond the dashboard, five purpose-built views for digging into a specific question:
+Beyond the dashboard, seven purpose-built views for digging into a specific question:
 
 - **Live Stream ("tail -f")** — a real-time console where new queries stream in at
   the top as they land (short-interval polling), for watching exactly what a device
@@ -398,13 +442,15 @@ Beyond the dashboard, five purpose-built views for digging into a specific quest
   would account for 45% of the SmartFridge's traffic") — **before** you commit the
   rule to Pi-hole. Runs entirely read-only against a hard-capped 7-day window; it never
   writes a rule anywhere.
-- **Client Heatmaps ("sleep mode")** — pick a device and see a **7-day × 24-hour**
-  grid of its activity in *your* local time, coloured by that client's own busiest
-  hour, to expose background chatter during hours it should be idle. Click any cell to
-  drill into the exact queries behind it (the spec's "what fired at 4 a.m. Wednesday?"
-  workflow). Timezone conversion is done explicitly in the backend from the browser's
-  own IANA zone, so "the middle of the night" is correct regardless of the container's
-  clock configuration.
+- **Client Heatmaps ("sleep mode")** — pick a device (or, from a second dropdown,
+  a whole **tag** — mutually exclusive with the single-device picker) and see a
+  **7-day × 24-hour** grid of its (or the tag's *combined*) activity in *your*
+  local time, coloured by the busiest hour, to expose background chatter during
+  hours it should be idle. Click any cell to drill into the exact queries behind
+  it (the spec's "what fired at 4 a.m. Wednesday?" workflow). Timezone conversion
+  is done explicitly in the backend from the browser's own IANA zone, so "the
+  middle of the night" is correct regardless of the container's clock
+  configuration.
 - **Domain Fan-out** — domains queried by several *different* devices within the same
   short window, surfacing synchronized beaconing (several IoT devices phoning the same
   tracker/C2 near-simultaneously) that a per-client view structurally can't show.
@@ -415,6 +461,18 @@ Beyond the dashboard, five purpose-built views for digging into a specific quest
   actually signals "near-simultaneous" rather than "generally popular" — tune both to
   taste. A passive, on-demand view rather than an alert rule; this is exploratory data
   worth a human's judgment, not something worth paging someone over.
+- **Tunneling Detector** — groups each client's queries by registered parent domain
+  (PSL-aware — bundles the Mozilla Public Suffix List so multi-part suffixes like
+  `co.uk` and shared CDN/cloud hosts like `*.s3.amazonaws.com` aren't
+  misattributed) and flags a device emitting an unusually high number of distinct
+  subdomains under one parent — the classic iodine/dnscat2 DNS-tunneling shape.
+  Capped to the last 7 days and, like Domain Fan-out, deliberately on-demand only:
+  CDN/cloud subdomains are also naturally high-cardinality, so this needs a human
+  reading it, not a page.
+- **Compare Clients** — put up to **three** devices' full profiles side by side
+  (summary cards, volume chart, top domains, query-type breakdown) over the same
+  chosen range, instead of flipping between separate detail views to answer "is
+  device A doing something device B isn't?"
 - **Trends** — the retrospective complement to the Blocklist Impact Simulator's
   forward-looking "what would this regex block": a **block rate over time** chart
   across your whole history, a **recently changed domains** list (domains that
