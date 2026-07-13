@@ -188,9 +188,9 @@ npm run dev    # http://localhost:5173, proxies /api to :8090
 ## What you get
 
 The app is organised into tabs: a **Dashboard** (everything below down to
-"Optional login"), plus three focused analysis views — **Live Stream**,
-**Blocklist Simulator**, and **Client Heatmaps** — described under
-"Analysis tabs" further down.
+"Optional login"), plus five focused analysis views — **Live Stream**,
+**Blocklist Simulator**, **Client Heatmaps**, **Domain Fan-out**, and
+**Trends** — described under "Analysis tabs" further down.
 
 - **Live query table** — every DNS query, auto-refreshing, with client, domain,
   status (allowed/blocked), and timestamp. Scrolls internally within a fixed-height
@@ -326,6 +326,12 @@ The app is organised into tabs: a **Dashboard** (everything below down to
      considered and left out: this container's default bridge network can't see
      LAN multicast traffic (a real networking trade-off, not a code gap — see
      `server/app/resolve.py`).
+
+  Every change from either source is logged — click **History** on a device
+  in the naming modal to see when its name changed and to what. Pi-hole's
+  own name isn't tracked here: DNS Watch has no write path to hook for it,
+  unlike the two sources above, so this only ever shows manual/reverse-DNS
+  changes.
 - **Client tags/groups** — click **🏷 Manage Tags** in the header to label a set of
   devices under a name (e.g. "kids", "IoT", "guest"). Once a tag has members, it
   shows up alongside individual devices in the dashboard's client/tag filter
@@ -345,12 +351,17 @@ The app is organised into tabs: a **Dashboard** (everything below down to
   randomized/locally-administered MAC (a privacy feature on most modern mobile OSes),
   which has no vendor in any registry by design.
 - **Automatic anomaly detection** — a **Network Anomalies** panel flags clients that
-  have gone unexpectedly **silent** or are **spiking**, judged against each client's
-  *own* rolling 7-day hourly baseline (fixed thresholds, always on — distinct from the
-  configurable Alert rules above, and needing no setup). Click a row to jump the
-  dashboard to the window it fired in, or click the **IP address** itself to open a
-  side-panel drill-down showing the anomaly's baseline vs. current values and the
-  actual DNS queries behind it.
+  have gone unexpectedly **silent**, are **spiking**, or whose **NXDOMAIN (failed
+  lookup) rate** just jumped well above their own norm — the last one is the
+  classic domain-generation-algorithm/dead-C2 signature, and unlike every other
+  rule here it looks at the *answer* to a query rather than its volume, type, or
+  domain name. All three are judged against each client's *own* rolling 7-day
+  baseline (fixed thresholds, always on — distinct from the configurable Alert
+  rules above, and needing no setup). The NXDOMAIN check only runs on Pi-hole's
+  newer on-disk layout, which is the only one that records a per-query reply
+  type at all. Click a row to jump the dashboard to the window it fired in, or
+  click the **IP address** itself to open a side-panel drill-down showing the
+  anomaly's baseline vs. current values and the actual DNS queries behind it.
 - **Optional login** — set `DNSWATCH_AUTH_PASSWORD` (or `DNSWATCH_AUTH_PASSWORD_FILE`
   to read it from a mounted file/Docker secret instead — see `.env.example`) to gate
   the whole app behind HTTP Basic auth. Left unset, it's open on your LAN as before.
@@ -371,7 +382,7 @@ The app is organised into tabs: a **Dashboard** (everything below down to
 
 ## Analysis tabs
 
-Beyond the dashboard, four purpose-built views for digging into a specific question:
+Beyond the dashboard, five purpose-built views for digging into a specific question:
 
 - **Live Stream ("tail -f")** — a real-time console where new queries stream in at
   the top as they land (short-interval polling), for watching exactly what a device
@@ -404,6 +415,16 @@ Beyond the dashboard, four purpose-built views for digging into a specific quest
   actually signals "near-simultaneous" rather than "generally popular" — tune both to
   taste. A passive, on-demand view rather than an alert rule; this is exploratory data
   worth a human's judgment, not something worth paging someone over.
+- **Trends** — the retrospective complement to the Blocklist Impact Simulator's
+  forward-looking "what would this regex block": a **block rate over time** chart
+  across your whole history, a **recently changed domains** list (domains that
+  started or stopped being blocked), and a **period-over-period comparison**
+  (current vs. the N days before it — 7/14/30) covering block-rate delta, the
+  biggest domain/client volume shifts, and newly-appeared devices. All three are
+  read straight from rollup tables DNS Watch already maintains for other
+  features, so there's no extra data collection behind this tab — it just needs
+  enough history built up to have a real prior period to compare against, and
+  says so explicitly rather than showing a misleading zero when it doesn't.
 
 ## Notes / limitations
 
