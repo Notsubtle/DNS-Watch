@@ -3,6 +3,12 @@ services:
     build:
       context: .
       dockerfile: server/Dockerfile
+      args:
+        # Labels the header "Production" in this environment only -- the UAT
+        # stacks (uat/docker-compose.uat.yml) don't set this build arg, so
+        # their built images stay unlabeled. Baked in at image build time, so
+        # it survives every `docker compose up --build` without any extra step.
+        VITE_ENV_LABEL: "Production"
     container_name: dns-dashboard
     restart: unless-stopped
     ports:

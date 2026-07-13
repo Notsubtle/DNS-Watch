@@ -4,6 +4,12 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
 RUN npm install
 COPY web/ ./
+# Baked into the built JS at compile time (Vite inlines import.meta.env.VITE_*
+# during `build`, unlike server-side env vars which are read at runtime) --
+# set via docker-compose.yml's build.args so it survives every rebuild
+# without a manual step, and left unset for the UAT stacks, which don't pass it.
+ARG VITE_ENV_LABEL=""
+ENV VITE_ENV_LABEL=$VITE_ENV_LABEL
 RUN npm run build
 
 # Stage 2: python runtime serving API + built frontend
