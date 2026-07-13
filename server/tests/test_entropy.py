@@ -54,3 +54,28 @@ def test_client_entropy_summary_empty_for_unknown_client(ftl):
         "pct_high_entropy": 0.0,
         "sample_domains": [],
     }
+
+
+def test_client_entropy_summary_uses_precomputed_domains(ftl, monkeypatch):
+    """client_detail() fetches top_domains() once and passes the list through
+    via `domains=` -- this must skip client_entropy_summary()'s own
+    top_domains() call entirely, not just avoid using its result, since a
+    second (ip, since) scan is exactly the duplicate work being avoided."""
+    from conftest import CLIENTS
+
+    ip = CLIENTS[0][0]
+
+    calls = []
+    orig = db.top_domains
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(db, "top_domains", spy)
+    domains = orig(ip, None, limit=500)
+    calls.clear()
+
+    summary = db.client_entropy_summary(ip, domains=domains)
+    assert not calls, "expected client_entropy_summary() not to re-run top_domains() when domains is given"
+    assert set(summary) == {"total_domains", "high_entropy_count", "pct_high_entropy", "sample_domains"}

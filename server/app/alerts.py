@@ -128,7 +128,7 @@ def init_store() -> None:
             -- that exact pairing.
             CREATE TABLE IF NOT EXISTS alert_suppressions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rule_id INTEGER NOT NULL,
+                rule_id INTEGER NOT NULL REFERENCES alert_rules(id) ON DELETE CASCADE,
                 client_ip TEXT,
                 domain TEXT,
                 created_at INTEGER NOT NULL
@@ -503,13 +503,13 @@ def update_rule(rule_id: int, *, name=None, enabled=None, params=None) -> dict |
 
 
 def delete_rule(rule_id: int) -> bool:
+    """A suppression for a deleted rule is dead weight, not a meaningful
+    "known false positive" anymore -- cascades via the FK, same pattern as
+    tags.py's delete_tag()."""
     init_store()
     with _connect() as conn:
+        conn.execute("PRAGMA foreign_keys=ON")
         cur = conn.execute("DELETE FROM alert_rules WHERE id = ?", (rule_id,))
-        # A suppression for a deleted rule is dead weight, not a meaningful
-        # "known false positive" anymore -- clean it up in the SAME commit so
-        # the review list never shows an orphaned entry pointing at nothing.
-        conn.execute("DELETE FROM alert_suppressions WHERE rule_id = ?", (rule_id,))
         conn.commit()
     return cur.rowcount > 0
 

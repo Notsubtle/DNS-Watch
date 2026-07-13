@@ -9,7 +9,9 @@
 // does, but for a soft visual badge on a live stream, an occasional miss on
 // an uncommon TLD is an acceptable tradeoff -- this is never used for
 // anything but display.
+// keep in sync with DOMAIN_ENTROPY_MIN_LENGTH in server/app/db.py
 const HIGH_ENTROPY_MIN_LENGTH = 8;
+// keep in sync with DOMAIN_ENTROPY_THRESHOLD in server/app/db.py
 const HIGH_ENTROPY_THRESHOLD = 3.3;
 
 function shannonEntropy(s: string): number {
