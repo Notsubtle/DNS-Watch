@@ -137,6 +137,68 @@ export interface QueryLatencyEntry {
   query_count: number;
 }
 
+// Blocklist-effectiveness trend: domains that recently started/stopped
+// being blocked -- the retrospective complement to the Blocklist Impact
+// Simulator's forward-looking "what would this regex block".
+export interface DomainStatusChange {
+  domain: string;
+  blocked_count?: number;   // present on newly_blocked entries
+  allowed_count?: number;   // present on newly_unblocked entries
+}
+
+export interface DomainStatusChanges {
+  ready: boolean;
+  newly_blocked: DomainStatusChange[];
+  newly_unblocked: DomainStatusChange[];
+}
+
+// Period-over-period "what changed" comparison -- current N-day period vs.
+// the N days immediately before it.
+export interface DomainShift {
+  domain: string;
+  current: number;
+  prior: number;
+  delta: number;
+}
+
+export interface ClientDelta {
+  ip: string;
+  name: string;
+  current: number;
+  prior: number;
+  delta: number;
+}
+
+export interface NewDevice {
+  ip: string;
+  name: string;
+  first_seen: number;
+}
+
+export interface PeriodComparison {
+  ready: boolean;
+  current_since?: number;
+  current_until?: number;
+  prior_since?: number;
+  prior_until?: number;
+  prior_period_available?: boolean;
+  block_rate_current?: number;
+  block_rate_prior?: number;
+  top_domain_shifts?: DomainShift[];
+  top_client_deltas?: ClientDelta[];
+  new_devices?: NewDevice[];
+}
+
+// Device name-change history (v1: manual overrides + reverse-DNS guesses
+// only -- Pi-hole's own name has no write hook DNS Watch controls, see
+// server/app/name_history.py's module docstring).
+export interface NameChangeEntry {
+  changed_at: number;
+  source: "manual" | "resolved";
+  old_name: string | null;
+  new_name: string | null;
+}
+
 export type RuleType =
   | "volume_threshold"
   | "new_device"
@@ -216,7 +278,11 @@ export interface ClientDetail {
 export interface Anomaly {
   ip: string;
   name: string;
-  kind: "silent" | "spike";
+  // "nxdomain": baseline_avg/current_value are a NXDOMAIN-rate PERCENTAGE
+  // (0-100), not a queries/hr count like "silent"/"spike" use -- see
+  // db._nxdomain_anomalies(). baseline_stddev is always 0 for this kind
+  // (not applicable to a rate metric).
+  kind: "silent" | "spike" | "nxdomain";
   baseline_avg: number;
   baseline_stddev: number;
   current_value: number;
@@ -451,6 +517,12 @@ export const api = {
   queryLatency: (range: string) =>
     getJson<QueryLatencyEntry[]>(`/api/query-latency${qs({ range })}`),
 
+  domainStatusChanges: (limit = 25) =>
+    getJson<DomainStatusChanges>(`/api/domain-status-changes${qs({ limit })}`),
+
+  periodComparison: (days = 7) =>
+    getJson<PeriodComparison>(`/api/period-comparison${qs({ days })}`),
+
   clientHeatmap: (ip: string, days = 7) =>
     getJson<HeatmapResult>(
       `/api/client/${encodeURIComponent(ip)}/heatmap${qs({
@@ -495,6 +567,8 @@ export const api = {
     sendJson<{ ip: string; name: string }>(`/api/device-names/${encodeURIComponent(ip)}`, "PUT", { name }),
   deleteDeviceName: (ip: string) =>
     sendJson<{ deleted: string }>(`/api/device-names/${encodeURIComponent(ip)}`, "DELETE"),
+  deviceNameHistory: (ip: string) =>
+    getJson<NameChangeEntry[]>(`/api/device-names/${encodeURIComponent(ip)}/history`),
 
   listVendors: () => getJson<Vendor[]>("/api/vendors"),
 

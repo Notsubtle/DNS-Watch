@@ -364,12 +364,14 @@ def _isolate_rollup_store(tmp_path, monkeypatch):
     call site (see db._display_name), so they need the identical treatment or
     they hit the same non-existent /data/dnswatch.db default. tags.py (#31)
     joins the same group -- alerts.py's rule scoping and main.py's dashboard
-    filter both read it unconditionally too."""
-    from app import names, resolve, rollups, tags
+    filter both read it unconditionally too. name_history.py joins it too --
+    names.py/resolve.py both call it unconditionally on every write."""
+    from app import name_history, names, resolve, rollups, tags
     monkeypatch.setattr(rollups, "STORE_PATH", str(tmp_path / "rollups-isolated.db"))
     monkeypatch.setattr(resolve, "STORE_PATH", str(tmp_path / "resolve-isolated.db"))
     monkeypatch.setattr(names, "STORE_PATH", str(tmp_path / "names-isolated.db"))
     monkeypatch.setattr(tags, "STORE_PATH", str(tmp_path / "tags-isolated.db"))
+    monkeypatch.setattr(name_history, "STORE_PATH", str(tmp_path / "name-history-isolated.db"))
 
 
 @pytest.fixture

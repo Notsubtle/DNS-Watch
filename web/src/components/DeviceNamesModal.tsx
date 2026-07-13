@@ -1,9 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, DeviceNameRow } from "../api";
+import { api, DeviceNameRow, NameChangeEntry } from "../api";
 
 interface Props {
   onClose: () => void;
   onChange: () => void; // ask App to reload clients/summary after a rename
+}
+
+function fmtChangeTime(ts: number): string {
+  return new Date(ts * 1000).toLocaleString([], {
+    month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function describeChange(e: NameChangeEntry): string {
+  const src = e.source === "manual" ? "manual" : "reverse-DNS";
+  if (e.old_name === null) return `${src}: set to "${e.new_name}"`;
+  if (e.new_name === null) return `${src}: cleared (was "${e.old_name}")`;
+  return `${src}: "${e.old_name}" → "${e.new_name}"`;
 }
 
 export default function DeviceNamesModal({ onClose, onChange }: Props) {
@@ -13,6 +26,26 @@ export default function DeviceNamesModal({ onClose, onChange }: Props) {
   // ip -> in-progress edit text, only while that row is being edited.
   const [editing, setEditing] = useState<Record<string, string>>({});
   const [savingIp, setSavingIp] = useState<string | null>(null);
+  // At most one row's history is expanded at a time; fetched on demand
+  // (not preloaded for every row) and cached per-ip for this modal session.
+  const [historyOpenIp, setHistoryOpenIp] = useState<string | null>(null);
+  const [historyByIp, setHistoryByIp] = useState<Record<string, NameChangeEntry[]>>({});
+  const [historyLoadingIp, setHistoryLoadingIp] = useState<string | null>(null);
+
+  function toggleHistory(ip: string) {
+    if (historyOpenIp === ip) {
+      setHistoryOpenIp(null);
+      return;
+    }
+    setHistoryOpenIp(ip);
+    if (historyByIp[ip]) return;
+    setHistoryLoadingIp(ip);
+    api
+      .deviceNameHistory(ip)
+      .then((h) => setHistoryByIp((m) => ({ ...m, [ip]: h })))
+      .catch((e) => setError((e as Error).message))
+      .finally(() => setHistoryLoadingIp((id) => (id === ip ? null : id)));
+  }
 
   function load() {
     setLoading(true);
@@ -53,6 +86,13 @@ export default function DeviceNamesModal({ onClose, onChange }: Props) {
         delete next[ip];
         return next;
       });
+      // Invalidate the cached history so the next expand re-fetches with
+      // this change included, rather than showing a stale list.
+      setHistoryByIp((m) => {
+        const next = { ...m };
+        delete next[ip];
+        return next;
+      });
       load();
       onChange();
     } catch (e) {
@@ -67,6 +107,11 @@ export default function DeviceNamesModal({ onClose, onChange }: Props) {
     setError(null);
     try {
       await api.deleteDeviceName(ip);
+      setHistoryByIp((m) => {
+        const next = { ...m };
+        delete next[ip];
+        return next;
+      });
       load();
       onChange();
     } catch (e) {
@@ -161,7 +206,25 @@ export default function DeviceNamesModal({ onClose, onChange }: Props) {
                         Clear
                       </button>
                     )}
+                    <button className="btn-small" onClick={() => toggleHistory(r.ip)}>
+                      {historyOpenIp === r.ip ? "Hide history" : "History"}
+                    </button>
                   </div>
+                )}
+
+                {historyOpenIp === r.ip && (
+                  <ul className="name-history-list">
+                    {historyLoadingIp === r.ip && <li className="modal-sub">Loading…</li>}
+                    {historyLoadingIp !== r.ip && (historyByIp[r.ip]?.length ?? 0) === 0 && (
+                      <li className="modal-sub">No recorded changes for this device yet.</li>
+                    )}
+                    {historyByIp[r.ip]?.map((h, i) => (
+                      <li key={`${h.changed_at}-${i}`}>
+                        <span className="name-history-time">{fmtChangeTime(h.changed_at)}</span>
+                        <span className="name-history-desc">{describeChange(h)}</span>
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </li>
             );

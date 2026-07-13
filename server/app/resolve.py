@@ -31,6 +31,8 @@ import sqlite3
 import struct
 import time
 
+from app import name_history
+
 STORE_PATH = os.environ.get("DNSWATCH_DB_PATH", "/data/dnswatch.db")
 
 # Optional explicit reverse-DNS server (e.g. your router's LAN IP, which often
@@ -253,11 +255,13 @@ def resolve_batch(candidate_ips: list[str], now: int | None = None) -> int:
             if len(due) >= BATCH_SIZE:
                 break
         prev_attempts = {}
+        prev_names: dict[str, str | None] = {}
         for ip in due:
             row = conn.execute(
-                "SELECT attempts FROM resolved_names WHERE ip = ?", (ip,)
+                "SELECT attempts, name FROM resolved_names WHERE ip = ?", (ip,)
             ).fetchone()
             prev_attempts[ip] = row["attempts"] if row else 0
+            prev_names[ip] = row["name"] if row else None
 
     # Network I/O (up to BATCH_SIZE blocking UDP queries) happens with no
     # write transaction open, so a slow/unreachable resolver never holds a
@@ -286,4 +290,14 @@ def resolve_batch(candidate_ips: list[str], now: int | None = None) -> int:
                     (ip, now, attempts, now + backoff),
                 )
         conn.commit()
+
+    # Logged only when the resolved name actually differs from what was
+    # cached before this batch -- most ticks re-confirm the same name (the
+    # periodic success-refresh) or the same ongoing silence, neither of
+    # which is a "change" worth a history row. record_change() itself also
+    # no-ops on an unchanged value, so this check is belt-and-suspenders,
+    # not the only guard.
+    for ip, name in results.items():
+        if name != prev_names.get(ip):
+            name_history.record_change(ip, "resolved", prev_names.get(ip), name)
     return len(due)

@@ -18,7 +18,7 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import alerts, backup, db, names, resolve, rollups, tags
+from app import alerts, backup, db, name_history, names, resolve, rollups, tags
 
 # How often the server evaluates alert rules on its own, independent of any open
 # dashboard. This is what makes alerting/webhooks work headless. Set to 0 to
@@ -471,9 +471,39 @@ def api_query_latency(
 
 @app.get("/api/anomalies")
 def api_anomalies():
-    """Automatic silent/spike detection against each client's own 7-day
-    baseline. Fixed thresholds, no params — see db.detect_anomalies()."""
+    """Automatic silent/spike/NXDOMAIN-rate detection against each client's
+    own 7-day baseline. Fixed thresholds, no params — see db.detect_anomalies()."""
     return db.detect_anomalies()
+
+
+@app.get("/api/domain-status-changes")
+def api_domain_status_changes(limit: int = Query(25, ge=1, le=200)):
+    """Domains that recently started or stopped being blocked -- the
+    retrospective complement to the Blocklist Impact Simulator's forward-
+    looking "what would this regex block". Rollup-only, no live-query
+    fallback (same reason new_domains()/seen_domains has none: answering
+    this from raw queries would mean scanning the whole history every call).
+    `ready: false` means the rollup hasn't backfilled far enough yet, not
+    "nothing changed" -- see rollups.read_domain_status_changes."""
+    result = rollups.read_domain_status_changes(limit)
+    if result is None:
+        return {"ready": False, "newly_blocked": [], "newly_unblocked": []}
+    return {"ready": True, **result}
+
+
+@app.get("/api/period-comparison")
+def api_period_comparison(days: int = Query(7, ge=1, le=90)):
+    """Current N-day period vs. the N days immediately before it: block-rate
+    delta, top domain volume shifts, top client volume deltas, and newly-
+    appeared devices -- a visual "what changed" view built entirely from
+    existing rollup tables. See rollups.read_period_comparison; `ready: false`
+    means the rollup isn't ready, and `prior_period_available: false` (once
+    ready) means there isn't yet a full prior period of history to compare
+    against, so its numbers shouldn't be read as "no change"."""
+    result = rollups.read_period_comparison(days)
+    if result is None:
+        return {"ready": False}
+    return {"ready": True, **result}
 
 
 @app.get("/api/client-activity")
@@ -683,6 +713,15 @@ def api_delete_device_name(ip: str):
     if not names.delete_name(ip):
         raise HTTPException(status_code=404, detail="no manual name set for this ip")
     return {"deleted": ip}
+
+
+@app.get("/api/device-names/{ip}/history")
+def api_device_name_history(ip: str, limit: int = Query(50, ge=1, le=200)):
+    """When this device's name changed and to what, for the two sources DNS
+    Watch itself writes (manual override, reverse-DNS guess) -- see
+    name_history.py's module docstring for why Pi-hole's own name isn't a
+    third source here."""
+    return name_history.history_for(ip, limit)
 
 
 @app.get("/api/vendors")

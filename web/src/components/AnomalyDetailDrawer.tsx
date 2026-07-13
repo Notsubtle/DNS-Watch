@@ -15,7 +15,9 @@ function fmtTime(ts: number): string {
 }
 
 function describeKind(kind: Anomaly["kind"]): string {
-  return kind === "silent" ? "Silent — no activity" : "Spike — unusual volume";
+  if (kind === "silent") return "Silent — no activity";
+  if (kind === "nxdomain") return "NXDOMAIN spike — unusual failed-lookup rate";
+  return "Spike — unusual volume";
 }
 
 interface Props {
@@ -93,12 +95,16 @@ export default function AnomalyDetailDrawer({ anomaly, onClose }: Props) {
             <div>
               <span className="drawer-stat-label">Baseline</span>
               <span className="drawer-stat-value">
-                {a.baseline_avg}/hr (±{a.baseline_stddev})
+                {a.kind === "nxdomain"
+                  ? `${a.baseline_avg}%`
+                  : `${a.baseline_avg}/hr (±${a.baseline_stddev})`}
               </span>
             </div>
             <div>
               <span className="drawer-stat-label">Current</span>
-              <span className="drawer-stat-value">{a.current_value}/hr</span>
+              <span className="drawer-stat-value">
+                {a.current_value}{a.kind === "nxdomain" ? "%" : "/hr"}
+              </span>
             </div>
           </div>
 

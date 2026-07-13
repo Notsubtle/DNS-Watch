@@ -2562,6 +2562,91 @@ def detect_anomalies() -> list[dict]:
                 "window_since": now - 3600, "window_until": now,
             })
 
+    anomalies.extend(_nxdomain_anomalies(now, baseline_start))
+    return anomalies
+
+
+# NXDOMAIN-rate anomaly ("this client's failed-lookup rate just jumped") --
+# the classic DGA/dead-C2 signature: malware probing generated domains gets
+# NXDOMAIN back for nearly all of them, a pattern invisible to every other
+# rule here (they key on volume, query *type*, or domain novelty, never the
+# *answer*). Only meaningful on Pi-hole's normalized (has_id_storage) layout
+# -- `reply_type` doesn't exist on the older client-table/plain-TEXT `queries`
+# layouts at all, same honest-scope precedent as slowest_domains()/
+# has_vendor_data elsewhere in this file.
+NXDOMAIN_REPLY_TYPE = 2  # FTL's `enum reply_type` value for REPLY_NXDOMAIN --
+                         # best-effort like BLOCKED_STATUSES/ALLOWED_STATUSES
+                         # above; there's no raw value to echo back here since
+                         # this is a single int, not a classified set.
+NXDOMAIN_WINDOW_HOURS = 3  # matches SILENT_WINDOW_HOURS/the volume spike's "now"
+NXDOMAIN_MIN_BASELINE_COUNT = 20  # need a real baseline sample before trusting its rate
+NXDOMAIN_MIN_RECENT_COUNT = 10    # ditto for the recent window
+NXDOMAIN_MIN_RECENT_NX = 5        # a handful of actual NXDOMAINs, not 1-2 flaky ones
+NXDOMAIN_RATE_MULTIPLIER = 3.0    # recent rate must clear 3x its own baseline...
+NXDOMAIN_MIN_FLOOR_RATE = 0.15    # ...AND clear an absolute 15% floor, so a client
+                                   # with a ~0% baseline (never hit NXDOMAIN before)
+                                   # doesn't trip on a trivial 1% blip (0 * 3 = 0).
+
+
+def _nxdomain_anomalies(now: int, baseline_start: int) -> list[dict]:
+    """Per-client NXDOMAIN rate: baseline (everything from `baseline_start`
+    up to the recent window) vs. recent (last NXDOMAIN_WINDOW_HOURS). One
+    query, partitioned by a CASE on the recent-window boundary, for the same
+    reason detect_anomalies() batches its volume query: this must never add
+    a second full-table scan per client."""
+    if not detect_schema().has_id_storage:
+        return []
+    recent_start = now - NXDOMAIN_WINDOW_HOURS * 3600
+    with _connect() as conn:
+        ipmap = _client_ip_map(conn)
+        namemap = _client_name_map(conn)
+        rows = conn.execute(
+            """
+            SELECT q.client AS cid,
+                   CASE WHEN q.timestamp >= ? THEN 1 ELSE 0 END AS is_recent,
+                   SUM(CASE WHEN q.reply_type = ? THEN 1 ELSE 0 END) AS nx,
+                   COUNT(*) AS total
+            FROM query_storage q
+            WHERE q.timestamp >= ?
+            GROUP BY q.client, is_recent
+            """,
+            [recent_start, NXDOMAIN_REPLY_TYPE, baseline_start],
+        ).fetchall()
+
+    per_client: dict[str, dict[str, int]] = {}
+    for r in rows:
+        ip = _resolve_client_value(r["cid"], ipmap)
+        if ip is None:
+            continue
+        c = per_client.setdefault(ip, {"baseline_nx": 0, "baseline_total": 0, "recent_nx": 0, "recent_total": 0})
+        if r["is_recent"]:
+            c["recent_nx"] += r["nx"]
+            c["recent_total"] += r["total"]
+        else:
+            c["baseline_nx"] += r["nx"]
+            c["baseline_total"] += r["total"]
+
+    resolved = resolve.get_names()
+    manual = names.get_names()
+    anomalies: list[dict] = []
+    for ip, c in per_client.items():
+        if c["baseline_total"] < NXDOMAIN_MIN_BASELINE_COUNT or c["recent_total"] < NXDOMAIN_MIN_RECENT_COUNT:
+            continue
+        if c["recent_nx"] < NXDOMAIN_MIN_RECENT_NX:
+            continue
+        baseline_rate = c["baseline_nx"] / c["baseline_total"]
+        recent_rate = c["recent_nx"] / c["recent_total"]
+        threshold = max(baseline_rate * NXDOMAIN_RATE_MULTIPLIER, NXDOMAIN_MIN_FLOOR_RATE)
+        if recent_rate <= threshold:
+            continue
+        name = _display_name(namemap.get(ip), ip, resolved, manual)
+        anomalies.append({
+            "ip": ip, "name": name, "kind": "nxdomain",
+            "baseline_avg": round(baseline_rate * 100, 1),
+            "baseline_stddev": 0.0,  # not applicable to a rate metric
+            "current_value": round(recent_rate * 100, 1),
+            "window_since": recent_start, "window_until": now,
+        })
     return anomalies
 
 
