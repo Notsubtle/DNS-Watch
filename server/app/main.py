@@ -454,6 +454,23 @@ def api_domain_fanout(
     return db.domain_fanout(effective_since, None, bucket_minutes, min_clients, limit)
 
 
+@app.get("/api/tunneling-candidates")
+def api_tunneling_candidates(
+    range: str | None = "1h",
+    since: int | None = None,
+    min_distinct: int = Query(20, ge=1, le=10000),
+    limit: int = Query(25, ge=1, le=200),
+):
+    """One client emitting an unusually high number of distinct subdomains
+    under a single registered parent domain (#2) -- the classic
+    iodine/dnscat2-style tunneling signature. On-demand only, deliberately
+    not an alert rule -- see db.tunneling_candidates' module note on why
+    (CDN/cloud subdomains are also high-cardinality, so this needs a human
+    reading it, not a page)."""
+    effective_since = _since_from_range(range, since)
+    return db.tunneling_candidates(effective_since, None, min_distinct, limit)
+
+
 @app.get("/api/query-latency")
 def api_query_latency(
     range: str | None = "1h",

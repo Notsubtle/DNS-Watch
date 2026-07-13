@@ -26,7 +26,7 @@ import statistics
 import time
 
 import regex as _timed_regex
-from app import names, oui, resolve
+from app import names, oui, psl, resolve
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -2084,6 +2084,136 @@ def _domain_fanout_id(
             })
         out.sort(key=lambda x: (x["client_count"], x["window_start"]), reverse=True)
         return out[:limit]
+
+
+# --------------------------------------------------------------------------
+# DNS-tunneling / exfiltration detector (#2 in the feature backlog): a
+# genuinely different axis from domain_fanout above (which looks at MANY
+# clients hitting ONE domain) -- this looks at ONE client emitting a large
+# number of distinct subdomains under a single REGISTERED parent domain
+# (classic iodine/dnscat2-style tunneling, and some exfil tooling). Grouping
+# by PSL-aware registered parent (see app/psl.py) rather than naive
+# last-two-labels avoids two failure modes: misidentifying the parent on
+# multi-part suffixes like co.uk, and mistakenly treating a shared CDN/cloud
+# host (*.s3.amazonaws.com) as one entity when it's actually many unrelated
+# tenants.
+#
+# Deliberately an ON-DEMAND panel, never an alert rule (see the feature
+# backlog's own scoping note): CDN/cloud subdomains are also
+# high-cardinality/random-looking, so this has real false-positive risk on a
+# typical home network and needs a human reading it, not a page.
+# --------------------------------------------------------------------------
+
+TUNNELING_MAX_LOOKBACK_SECONDS = 7 * 86400  # mirrors domain_fanout's cap
+TUNNELING_MIN_DISTINCT_DEFAULT = 20
+TUNNELING_LIMIT_DEFAULT = 25
+_TUNNELING_SAMPLE_SIZE = 5
+
+
+def _tunneling_group(rows: list[tuple]) -> list[dict]:
+    """Shared aggregation for both schema paths below: rows is a list of
+    (ip, domain, count) already GROUP BY'd in SQL (so repeat queries for the
+    same domain collapse to one entry before the Python-side PSL grouping,
+    keeping this loop's cost proportional to DISTINCT (client, domain) pairs,
+    not raw query volume)."""
+    groups: dict[tuple[str, str], dict] = {}
+    for ip, domain, count in rows:
+        if ip is None or domain is None:
+            continue
+        parent = psl.registered_domain(domain)
+        key = (ip, parent)
+        g = groups.setdefault(key, {"subdomains": set(), "query_count": 0, "prefix_lens": []})
+        g["subdomains"].add(domain)
+        g["query_count"] += count
+        # Length of whatever sits to the left of the registered parent -- a
+        # long/high-entropy prefix under one parent is the actual tunneling
+        # signature; the parent domain's own length says nothing about it.
+        if len(domain) > len(parent):
+            g["prefix_lens"].append(len(domain) - len(parent) - 1)  # -1 for the dot
+        else:
+            g["prefix_lens"].append(0)
+    out = []
+    for (ip, parent), g in groups.items():
+        out.append({
+            "ip": ip,
+            "parent_domain": parent,
+            "distinct_subdomains": len(g["subdomains"]),
+            "query_count": g["query_count"],
+            "avg_prefix_length": round(statistics.mean(g["prefix_lens"]), 1),
+            "sample_subdomains": sorted(g["subdomains"])[:_TUNNELING_SAMPLE_SIZE],
+        })
+    return out
+
+
+def tunneling_candidates(
+    since: int | None,
+    until: int | None = None,
+    min_distinct: int = TUNNELING_MIN_DISTINCT_DEFAULT,
+    limit: int = TUNNELING_LIMIT_DEFAULT,
+) -> list[dict]:
+    """Per-(client, registered-parent-domain) groups with an unusually high
+    number of distinct subdomains within the window -- see module note above.
+    Each entry: {"ip", "name", "parent_domain", "distinct_subdomains",
+    "query_count", "avg_prefix_length", "sample_subdomains"}, sorted by
+    distinct_subdomains descending.
+
+    `since` is hard-capped to TUNNELING_MAX_LOOKBACK_SECONDS, same
+    bounded-range-only contract as domain_fanout (never an "All" scan).
+    """
+    now = int(time.time())
+    until = until if until is not None else now
+    earliest = now - TUNNELING_MAX_LOOKBACK_SECONDS
+    since = earliest if since is None else max(since, earliest)
+
+    if detect_schema().has_id_storage:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT client, domain, COUNT(*) AS cnt FROM query_storage "
+                "WHERE timestamp >= ? AND timestamp < ? GROUP BY client, domain",
+                [since, until],
+            ).fetchall()
+            ipmap = _client_ip_map(conn)
+            dmap = _domain_text_map(conn)
+            resolved_pairs = [
+                (_resolve_client_value(r["client"], ipmap), _resolve_domain_value(r["domain"], dmap), r["cnt"])
+                for r in rows
+            ]
+            namemap = _client_name_map(conn)
+    else:
+        select, join = _client_join_sql()
+        client_col = _client_ip_col()
+        with _connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {client_col} AS ip, q.domain AS domain, COUNT(*) AS cnt
+                FROM queries q
+                {join}
+                WHERE q.timestamp >= ? AND q.timestamp < ?
+                GROUP BY {client_col}, q.domain
+                """,
+                [since, until],
+            ).fetchall()
+            resolved_pairs = [(r["ip"], r["domain"], r["cnt"]) for r in rows]
+            # Not every schema shape has a name-bearing network_addresses table
+            # in the shape _client_name_map assumes (see its own docstring --
+            # that's a "real"/idstore-only source); reuse the same select/join
+            # every other view-path function uses for names instead, same
+            # idiom as new_clients() above.
+            name_rows = conn.execute(
+                f"SELECT DISTINCT {select} FROM queries q {join} "
+                "WHERE q.timestamp >= ? AND q.timestamp < ?",
+                [since, until],
+            ).fetchall()
+            namemap = {r["client_ip"]: r["client_name"] for r in name_rows}
+
+    resolved = resolve.get_names()
+    manual = names.get_names()
+    groups = _tunneling_group(resolved_pairs)
+    out = [g for g in groups if g["distinct_subdomains"] >= min_distinct]
+    for g in out:
+        g["name"] = _display_name(namemap.get(g["ip"]), g["ip"], resolved, manual)
+    out.sort(key=lambda x: x["distinct_subdomains"], reverse=True)
+    return out[:limit]
 
 
 def slowest_domains(

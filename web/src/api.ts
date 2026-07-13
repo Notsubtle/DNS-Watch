@@ -152,6 +152,19 @@ export interface DomainStatusChanges {
   newly_unblocked: DomainStatusChange[];
 }
 
+// DNS-tunneling/exfiltration detector (#2) -- one client emitting an
+// unusually high number of distinct subdomains under a single registered
+// parent domain. On-demand only, not an alert rule -- see db.tunneling_candidates.
+export interface TunnelingCandidate {
+  ip: string;
+  name: string;
+  parent_domain: string;
+  distinct_subdomains: number;
+  query_count: number;
+  avg_prefix_length: number;
+  sample_subdomains: string[];
+}
+
 // Period-over-period "what changed" comparison -- current N-day period vs.
 // the N days immediately before it.
 export interface DomainShift {
@@ -531,6 +544,11 @@ export const api = {
 
   queryLatency: (range: string) =>
     getJson<QueryLatencyEntry[]>(`/api/query-latency${qs({ range })}`),
+
+  tunnelingCandidates: (range: string, minDistinct: number) =>
+    getJson<TunnelingCandidate[]>(
+      `/api/tunneling-candidates${qs({ range, min_distinct: minDistinct })}`
+    ),
 
   domainStatusChanges: (limit = 25) =>
     getJson<DomainStatusChanges>(`/api/domain-status-changes${qs({ limit })}`),
