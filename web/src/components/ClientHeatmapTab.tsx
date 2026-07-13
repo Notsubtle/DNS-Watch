@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
-import { api, ClientInfo, HeatmapResult } from "../api";
+import { api, ClientInfo, HeatmapResult, Tag } from "../api";
 import HeatmapCellModal from "./HeatmapCellModal";
 
 // Monday=0..Sunday=6 — matches the backend's datetime.weekday() convention
@@ -17,24 +17,29 @@ function cellBackground(value: number, max: number): string {
 
 interface Props {
   clients: ClientInfo[];
+  tags: Tag[];
 }
 
-export default function ClientHeatmapTab({ clients }: Props) {
+export default function ClientHeatmapTab({ clients, tags }: Props) {
   const [ip, setIp] = useState("");
+  // Tag-scoped heatmap (#7) -- mutually exclusive with `ip` above, same
+  // "one active scope at a time" pattern the dashboard's own client/tag/
+  // vendor filter uses. Picking one clears the other.
+  const [tag, setTag] = useState("");
   const [heatmap, setHeatmap] = useState<HeatmapResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cell, setCell] = useState<{ weekday: number; hour: number } | null>(null);
 
   useEffect(() => {
-    if (!ip) {
+    if (!ip && !tag) {
       setHeatmap(null);
       return;
     }
     let cancelled = false;
     setLoading(true);
-    api
-      .clientHeatmap(ip)
+    const req = tag ? api.tagHeatmap(tag) : api.clientHeatmap(ip);
+    req
       .then((h) => {
         if (cancelled) return;
         setHeatmap(h);
@@ -45,7 +50,7 @@ export default function ClientHeatmapTab({ clients }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [ip]);
+  }, [ip, tag]);
 
   const selectedClient = clients.find((c) => c.ip === ip);
 
@@ -53,7 +58,13 @@ export default function ClientHeatmapTab({ clients }: Props) {
     <div className="heatmap-tab">
       <div className="panel">
         <h2>Client Heatmap</h2>
-        <select value={ip} onChange={(e) => setIp(e.target.value)}>
+        <select
+          value={ip}
+          onChange={(e) => {
+            setIp(e.target.value);
+            setTag("");
+          }}
+        >
           <option value="">Select a client…</option>
           {clients.map((c) => (
             <option key={c.ip} value={c.ip}>
@@ -61,10 +72,29 @@ export default function ClientHeatmapTab({ clients }: Props) {
             </option>
           ))}
         </select>
+        {tags.length > 0 && (
+          <select
+            value={tag}
+            onChange={(e) => {
+              setTag(e.target.value);
+              setIp("");
+            }}
+            title="Or view a tag's combined activity across all its members"
+          >
+            <option value="">— or a tag —</option>
+            {tags.map((t) => (
+              <option key={t.name} value={t.name}>
+                🏷 {t.name}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
-      {!ip && (
-        <div className="tab-placeholder">Select a client to see their weekly activity pattern.</div>
+      {!ip && !tag && (
+        <div className="tab-placeholder">
+          Select a client or a tag to see its weekly activity pattern.
+        </div>
       )}
       {loading && <div className="chart-empty">Loading…</div>}
       {error && <div className="error-banner">{error}</div>}
@@ -98,10 +128,11 @@ export default function ClientHeatmapTab({ clients }: Props) {
         </div>
       )}
 
-      {cell && ip && (
+      {cell && (ip || tag) && (
         <HeatmapCellModal
-          ip={ip}
-          clientName={selectedClient?.name ?? ip}
+          ip={ip || undefined}
+          tag={tag || undefined}
+          clientName={tag ? `🏷 ${tag}` : selectedClient?.name ?? ip}
           weekday={cell.weekday}
           hour={cell.hour}
           onClose={() => setCell(null)}

@@ -403,6 +403,37 @@ def api_client_heatmap_cell(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.get("/api/tags/{name}/heatmap")
+def api_tag_heatmap(name: str, tz: str, days: int = Query(7, ge=1, le=30)):
+    """7x24 activity grid summed across every member of tag `name` (#7) --
+    the tag-scoped sibling of /api/client/{ip}/heatmap. 404s for an unknown
+    tag, same as the dashboard's other tag-scoped filters."""
+    ips = tags.get_tag_ips(name)
+    if ips is None:
+        raise HTTPException(status_code=404, detail=f"no such tag: {name!r}")
+    try:
+        return db.client_heatmap(ips, tz, days)
+    except ZoneInfoNotFoundError:
+        raise HTTPException(status_code=400, detail="Unknown timezone")
+
+
+@app.get("/api/tags/{name}/heatmap/cell")
+def api_tag_heatmap_cell(
+    name: str, tz: str, weekday: int, hour: int, days: int = Query(7, ge=1, le=30)
+):
+    """The exact rows behind one tag-scoped heatmap cell -- each row carries
+    its own client_ip/client_name, so this is automatically multi-client-aware."""
+    ips = tags.get_tag_ips(name)
+    if ips is None:
+        raise HTTPException(status_code=404, detail=f"no such tag: {name!r}")
+    try:
+        return db.client_heatmap_cell(ips, tz, weekday, hour, days)
+    except ZoneInfoNotFoundError:
+        raise HTTPException(status_code=400, detail="Unknown timezone")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/api/summary")
 def api_summary(
     client: str | None = None, tag: str | None = None, vendor: str | None = None,
@@ -454,6 +485,23 @@ def api_domain_fanout(
     return db.domain_fanout(effective_since, None, bucket_minutes, min_clients, limit)
 
 
+@app.get("/api/tunneling-candidates")
+def api_tunneling_candidates(
+    range: str | None = "1h",
+    since: int | None = None,
+    min_distinct: int = Query(20, ge=1, le=10000),
+    limit: int = Query(25, ge=1, le=200),
+):
+    """One client emitting an unusually high number of distinct subdomains
+    under a single registered parent domain (#2) -- the classic
+    iodine/dnscat2-style tunneling signature. On-demand only, deliberately
+    not an alert rule -- see db.tunneling_candidates' module note on why
+    (CDN/cloud subdomains are also high-cardinality, so this needs a human
+    reading it, not a page)."""
+    effective_since = _since_from_range(range, since)
+    return db.tunneling_candidates(effective_since, None, min_distinct, limit)
+
+
 @app.get("/api/query-latency")
 def api_query_latency(
     range: str | None = "1h",
@@ -471,9 +519,19 @@ def api_query_latency(
 
 @app.get("/api/anomalies")
 def api_anomalies():
-    """Automatic silent/spike/NXDOMAIN-rate detection against each client's
-    own 7-day baseline. Fixed thresholds, no params — see db.detect_anomalies()."""
+    """Automatic silent/spike/NXDOMAIN-rate/latency detection against each
+    client's own 7-day baseline. Fixed thresholds, no params — see
+    db.detect_anomalies()."""
     return db.detect_anomalies()
+
+
+@app.get("/api/latency-health")
+def api_latency_health():
+    """Network-wide resolver latency health (#4) -- whole-network baseline
+    vs. recent average reply_time. `null` means no signal yet (schema
+    without reply_time, or not enough samples), not "healthy" -- see
+    db.network_latency_health."""
+    return db.network_latency_health()
 
 
 @app.get("/api/domain-status-changes")
@@ -504,6 +562,50 @@ def api_period_comparison(days: int = Query(7, ge=1, le=90)):
     if result is None:
         return {"ready": False}
     return {"ready": True, **result}
+
+
+@app.get("/api/device-names/{ip}/timeline")
+def api_device_timeline(ip: str, limit: int = Query(50, ge=1, le=200)):
+    """Unified per-device investigation timeline (#5) -- merges name-change
+    history and fired alert events into one chronological feed, each entry
+    tagged with a "type" discriminator ("name_change" | "alert_event") so the
+    frontend can render each shape appropriately.
+
+    v1 scope note: anomaly detections (silent/spike/nxdomain/latency) are
+    deliberately NOT included -- detect_anomalies() is stateless/live-only
+    (see its own module note), nothing persists a history of past anomaly
+    detections the way alert_events does for rules. Adding that would need a
+    new persistence layer, out of scope here -- same kind of explicit v1
+    punt as name_history's own "Pi-hole's own name changes aren't tracked"
+    note."""
+    # Spread the source row FIRST, then override "type"/"at" -- alert_events
+    # rows already have their own "type" (the alert RULE type, e.g.
+    # "new_device"), which would silently clobber this discriminator if the
+    # override came first.
+    changes = [
+        {**c, "type": "name_change", "at": c["changed_at"]}
+        for c in name_history.history_for(ip, limit)
+    ]
+    events = [
+        {**e, "type": "alert_event", "at": e["created_at"]}
+        for e in alerts.events_for_client(ip, limit)
+    ]
+    merged = sorted(changes + events, key=lambda e: e["at"], reverse=True)
+    return merged[:limit]
+
+
+@app.get("/api/device-names/{ip}/new-domains")
+def api_device_new_domains(ip: str, days: int = Query(30, ge=1, le=365), limit: int = Query(50, ge=1, le=200)):
+    """Domains THIS device has queried for the first time in the last `days`
+    days (#1 in the feature backlog) -- the per-client sibling of
+    domain-status-changes above. Rollup-only, same `ready: false` contract as
+    every other rollups.py read: it means "not backfilled yet", not "no new
+    domains for this device". See rollups.client_new_domains."""
+    since = int(time.time()) - days * 86400
+    domains = rollups.client_new_domains(since, ip=ip, limit=limit)
+    if domains is None:
+        return {"ready": False, "domains": []}
+    return {"ready": True, "domains": domains}
 
 
 @app.get("/api/client-activity")
@@ -584,13 +686,24 @@ def api_test_webhook(body: WebhookTest):
 
 @app.get("/api/storage-stats")
 def api_storage_stats():
-    return alerts.storage_stats()
+    return {**alerts.storage_stats(), **rollups.storage_stats()}
 
 
 @app.post("/api/storage/prune-events")
 def api_prune_events(body: PruneEventsRequest):
     try:
         return {"deleted": alerts.prune_events(body.older_than_days)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/storage/prune-domain-history")
+def api_prune_domain_history(body: PruneEventsRequest):
+    """Retention for the two unbounded-growth rollup tables (#10) --
+    seen_domains and domain_status_daily, both explicitly disclosed as
+    having no retention policy in v1. See rollups.prune_domain_history."""
+    try:
+        return rollups.prune_domain_history(body.older_than_days)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -690,6 +803,39 @@ def api_delete_rule(rule_id: int):
     if not alerts.delete_rule(rule_id):
         raise HTTPException(status_code=404, detail="rule not found")
     return {"deleted": rule_id}
+
+
+class SuppressionCreate(BaseModel):
+    rule_id: int
+    client_ip: str | None = None
+    domain: str | None = None
+
+
+@app.get("/api/alert-suppressions")
+def api_list_suppressions():
+    """The review list a permanent suppression's own risk note calls for
+    (#6) -- without this, a forgotten suppression could silently hide a real
+    future problem."""
+    return alerts.list_suppressions()
+
+
+@app.post("/api/alert-suppressions")
+def api_create_suppression(body: SuppressionCreate):
+    """Permanently suppress a rule for a specific device and/or domain (#6)
+    -- distinct from the time-boxed snooze above. See alerts.add_suppression
+    and the alert_suppressions schema comment for exactly what NULL means in
+    each field."""
+    try:
+        return alerts.add_suppression(body.rule_id, body.client_ip, body.domain)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/alert-suppressions/{suppression_id}")
+def api_delete_suppression(suppression_id: int):
+    if not alerts.remove_suppression(suppression_id):
+        raise HTTPException(status_code=404, detail="suppression not found")
+    return {"deleted": suppression_id}
 
 
 @app.get("/api/device-names")

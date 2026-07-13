@@ -124,3 +124,23 @@ def test_no_op_on_older_schemas(ftl):
         return
     now = int(time.time())
     assert db._nxdomain_anomalies(now, now - 7 * 86400) == []
+
+
+def test_detect_anomalies_shares_one_query_storage_scan(ftl, monkeypatch):
+    """detect_anomalies() must run _windowed_client_stats exactly once and
+    hand the same result to both _nxdomain_anomalies and _latency_anomalies
+    -- see its own comment for why a second independent query_storage scan
+    per poll (ANOMALIES_REFRESH_MS in App.tsx) is the thing being guarded
+    against here."""
+    from app import db
+
+    calls = []
+    orig = db._windowed_client_stats
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(db, "_windowed_client_stats", spy)
+    db.detect_anomalies()
+    assert len(calls) == 1, "expected exactly one shared query_storage scan per detect_anomalies() call"

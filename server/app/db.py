@@ -26,7 +26,7 @@ import statistics
 import time
 
 import regex as _timed_regex
-from app import names, oui, resolve
+from app import names, oui, psl, resolve
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -944,6 +944,92 @@ def _top_domains_id(client: str | list[str] | None, since: int | None, limit: in
     return out[:limit]
 
 
+# --------------------------------------------------------------------------
+# Domain lexical/entropy scoring (#3 in the feature backlog): a SOFT,
+# per-domain metric complementing the NXDOMAIN-rate anomaly detector -- a
+# live C2/DGA domain that actually resolves won't trip NXDOMAIN detection at
+# all (it only fires on failed lookups), but a high-entropy/algorithmically-
+# generated label scores high here regardless of whether it resolves.
+#
+# Deliberately presented as a soft score/badge everywhere it's surfaced,
+# NEVER a hard alert -- legitimately random-looking hostnames (CDN edge
+# nodes, content hashes, hashed asset paths) are common and would make a
+# hard threshold noisy on an ordinary home network.
+# --------------------------------------------------------------------------
+
+# Below this many characters, entropy is too noisy to mean anything (e.g. a
+# 4-character label has at most 2 bits/char of headroom just from being
+# short) -- short domains are never flagged regardless of their score.
+# keep in sync with HIGH_ENTROPY_MIN_LENGTH in web/src/entropy.ts
+DOMAIN_ENTROPY_MIN_LENGTH = 8
+# Shannon entropy, bits/char, over the label(s) sitting in front of the
+# registered parent domain. English words/hostnames typically land under
+# ~3.0; random/base32-ish DGA output typically lands well above it. Chosen
+# as a conventional DGA-detection cutoff, not tuned against this app's own
+# data -- see the module note above on why this is a soft score, not a hard
+# alert threshold.
+# keep in sync with HIGH_ENTROPY_THRESHOLD in web/src/entropy.ts
+DOMAIN_ENTROPY_THRESHOLD = 3.3
+
+
+def _shannon_entropy(s: str) -> float:
+    """Bits per character, over `s`'s own character frequency distribution.
+    0.0 for an empty or single-repeated-character string (no information)."""
+    if not s:
+        return 0.0
+    counts: dict[str, int] = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+def domain_entropy(domain: str | None) -> float:
+    """Entropy of the part of `domain` that sits IN FRONT OF its registered
+    parent (see app/psl.py) -- e.g. for "a1b2c3.tunnel.example.com" this
+    scores "a1b2c3.tunnel", not the whole hostname, so a domain's popularity
+    or a long-but-ordinary registered name (github.io) doesn't dilute the
+    score of whatever a client actually chose to put in front of it. Falls
+    back to the whole hostname when there's nothing in front of the parent
+    (domain.registered_domain(domain) == domain itself)."""
+    if not domain:
+        return 0.0
+    parent = psl.registered_domain(domain)
+    prefix = domain[: -len(parent) - 1] if len(domain) > len(parent) else domain
+    return _shannon_entropy(prefix.replace(".", ""))
+
+
+def is_high_entropy_domain(domain: str | None) -> bool:
+    if not domain or len(domain) < DOMAIN_ENTROPY_MIN_LENGTH:
+        return False
+    return domain_entropy(domain) >= DOMAIN_ENTROPY_THRESHOLD
+
+
+def client_entropy_summary(
+    ip: str, since: int | None = None, limit_domains: int = 500, domains: list[dict] | None = None
+) -> dict:
+    """Per-client "% of this device's distinct domains that look
+    high-entropy" (#3) -- computed over DISTINCT domains (via top_domains),
+    not raw query volume, so a client hammering one high-entropy domain
+    doesn't dominate the percentage the way a query-count-weighted average
+    would.
+
+    `domains` lets a caller that already fetched top_domains(ip, since, ...)
+    (e.g. client_detail()) pass that list straight through instead of this
+    function re-running the same (ip, since) scan a second time."""
+    if domains is None:
+        domains = top_domains(ip, since, limit=limit_domains)
+    named = [d["domain"] for d in domains if d["domain"] is not None]
+    high = [d for d in named if is_high_entropy_domain(d)]
+    total = len(named)
+    return {
+        "total_domains": total,
+        "high_entropy_count": len(high),
+        "pct_high_entropy": round(100 * len(high) / total, 1) if total else 0.0,
+        "sample_domains": high[:10],
+    }
+
+
 def top_blocked_per_client(
     client: str | list[str] | None, since: int | None, limit: int = 15
 ) -> list[dict]:
@@ -1518,15 +1604,20 @@ def client_detail(ip: str, since: int | None, until: int | None) -> dict:
         ).fetchone()
         vendor_fields = _vendor_fields(ip, _client_vendor_map(conn))
     name = _display_name(row["client_name"] if row else None, ip, resolve.get_names(), names.get_names())
+    # Fetched once at the wider limit and sliced for the response's own
+    # top_domains field, so client_entropy_summary() below doesn't re-run
+    # the same (ip, since) top_domains() scan a second time.
+    all_domains = top_domains(ip, since, limit=500)
     return {
         "ip": ip,
         "name": name,
         "first_seen": row["fs"] if row else None,
         "last_seen": row["ls"] if row else None,
         "summary": summary(ip, since, until),
-        "top_domains": top_domains(ip, since, limit=10),
+        "top_domains": all_domains[:10],
         "query_types": query_types(ip, since, until),
         "timeseries": timeseries(ip, since, until, buckets=40),
+        "entropy": client_entropy_summary(ip, since, domains=all_domains),
         **vendor_fields,
     }
 
@@ -1553,9 +1644,13 @@ def _local_offset_seconds(tz_name: str) -> float:
     return datetime.now(tz).utcoffset().total_seconds()
 
 
-def client_heatmap(client_ip: str, tz_name: str, days: int = 7) -> dict:
-    """One client's queries bucketed into a 7(weekday) x 24(hour) grid, in
-    the caller's local time (see `_local_offset_seconds`).
+def client_heatmap(client_ip: str | list[str], tz_name: str, days: int = 7) -> dict:
+    """One client's (or, #7 in the feature backlog, a whole tag's COMBINED)
+    queries bucketed into a 7(weekday) x 24(hour) grid, in the caller's local
+    time (see `_local_offset_seconds`). `client_ip` accepts a list the same
+    way `_build_where` already does elsewhere (#31) -- summed into one grid,
+    not one grid per member; that's the simplest v1 shape (a per-member
+    overlay is a real alternative, just a bigger UI lift for a first cut).
 
     `weekday` follows Python's `datetime.weekday()` convention: Monday=0,
     Sunday=6 — the frontend must use the same convention when labeling rows,
@@ -1567,15 +1662,31 @@ def client_heatmap(client_ip: str, tz_name: str, days: int = 7) -> dict:
 
     _, join = _client_join_sql()
     where_sql, params = _build_where(client=client_ip, since=since, until=now)
+    # Bucket weekday/hour in SQL rather than pulling every row into Python --
+    # a tag-scoped grid (client_ip a list, #7) can otherwise mean scanning
+    # every member's full window just to increment a 7x24 grid. strftime
+    # treats its epoch argument as UTC, so shifting the raw timestamp by the
+    # already-computed local offset (same trick client_heatmap_cell uses)
+    # gives local wall-clock weekday/hour directly; SQLite's %w is
+    # Sunday=0..Saturday=6, remapped to Python's Monday=0..Sunday=6 below.
     with _connect() as conn:
         rows = conn.execute(
-            f"SELECT q.timestamp FROM queries q {join} WHERE {where_sql}", params
+            f"""
+            SELECT
+                CAST(strftime('%w', (q.timestamp + ?), 'unixepoch') AS INTEGER) AS dow,
+                CAST(strftime('%H', (q.timestamp + ?), 'unixepoch') AS INTEGER) AS hour,
+                COUNT(*) AS n
+            FROM queries q {join}
+            WHERE {where_sql}
+            GROUP BY dow, hour
+            """,
+            [offset, offset, *params],
         ).fetchall()
 
     grid = [[0] * 24 for _ in range(7)]
     for r in rows:
-        local_dt = datetime.fromtimestamp(r["timestamp"] + offset, tz=timezone.utc)
-        grid[local_dt.weekday()][local_dt.hour] += 1
+        weekday = (r["dow"] + 6) % 7
+        grid[weekday][r["hour"]] += r["n"]
 
     return {
         "tz": tz_name,
@@ -1586,10 +1697,14 @@ def client_heatmap(client_ip: str, tz_name: str, days: int = 7) -> dict:
 
 
 def client_heatmap_cell(
-    client_ip: str, tz_name: str, weekday: int, hour: int, days: int = 7
+    client_ip: str | list[str], tz_name: str, weekday: int, hour: int, days: int = 7
 ) -> list[dict]:
     """The exact rows behind one heatmap cell — built on top of the existing
     `list_queries()` rather than a new query shape, per the task plan.
+    `client_ip` accepts a tag's member-ip list the same way client_heatmap()
+    above does (#7); each returned row already carries its own client_ip/
+    client_name, so a tag-scoped drill-down is automatically multi-client-
+    aware -- no extra plumbing needed to know WHICH member(s) hit a cell.
 
     Uses the SAME offset computation as `client_heatmap()` (never re-derived
     here) so the two can never silently drift apart. A window wider than 7
@@ -2086,6 +2201,136 @@ def _domain_fanout_id(
         return out[:limit]
 
 
+# --------------------------------------------------------------------------
+# DNS-tunneling / exfiltration detector (#2 in the feature backlog): a
+# genuinely different axis from domain_fanout above (which looks at MANY
+# clients hitting ONE domain) -- this looks at ONE client emitting a large
+# number of distinct subdomains under a single REGISTERED parent domain
+# (classic iodine/dnscat2-style tunneling, and some exfil tooling). Grouping
+# by PSL-aware registered parent (see app/psl.py) rather than naive
+# last-two-labels avoids two failure modes: misidentifying the parent on
+# multi-part suffixes like co.uk, and mistakenly treating a shared CDN/cloud
+# host (*.s3.amazonaws.com) as one entity when it's actually many unrelated
+# tenants.
+#
+# Deliberately an ON-DEMAND panel, never an alert rule (see the feature
+# backlog's own scoping note): CDN/cloud subdomains are also
+# high-cardinality/random-looking, so this has real false-positive risk on a
+# typical home network and needs a human reading it, not a page.
+# --------------------------------------------------------------------------
+
+TUNNELING_MAX_LOOKBACK_SECONDS = 7 * 86400  # mirrors domain_fanout's cap
+TUNNELING_MIN_DISTINCT_DEFAULT = 20
+TUNNELING_LIMIT_DEFAULT = 25
+_TUNNELING_SAMPLE_SIZE = 5
+
+
+def _tunneling_group(rows: list[tuple]) -> list[dict]:
+    """Shared aggregation for both schema paths below: rows is a list of
+    (ip, domain, count) already GROUP BY'd in SQL (so repeat queries for the
+    same domain collapse to one entry before the Python-side PSL grouping,
+    keeping this loop's cost proportional to DISTINCT (client, domain) pairs,
+    not raw query volume)."""
+    groups: dict[tuple[str, str], dict] = {}
+    for ip, domain, count in rows:
+        if ip is None or domain is None:
+            continue
+        parent = psl.registered_domain(domain)
+        key = (ip, parent)
+        g = groups.setdefault(key, {"subdomains": set(), "query_count": 0, "prefix_lens": []})
+        g["subdomains"].add(domain)
+        g["query_count"] += count
+        # Length of whatever sits to the left of the registered parent -- a
+        # long/high-entropy prefix under one parent is the actual tunneling
+        # signature; the parent domain's own length says nothing about it.
+        if len(domain) > len(parent):
+            g["prefix_lens"].append(len(domain) - len(parent) - 1)  # -1 for the dot
+        else:
+            g["prefix_lens"].append(0)
+    out = []
+    for (ip, parent), g in groups.items():
+        out.append({
+            "ip": ip,
+            "parent_domain": parent,
+            "distinct_subdomains": len(g["subdomains"]),
+            "query_count": g["query_count"],
+            "avg_prefix_length": round(statistics.mean(g["prefix_lens"]), 1),
+            "sample_subdomains": sorted(g["subdomains"])[:_TUNNELING_SAMPLE_SIZE],
+        })
+    return out
+
+
+def tunneling_candidates(
+    since: int | None,
+    until: int | None = None,
+    min_distinct: int = TUNNELING_MIN_DISTINCT_DEFAULT,
+    limit: int = TUNNELING_LIMIT_DEFAULT,
+) -> list[dict]:
+    """Per-(client, registered-parent-domain) groups with an unusually high
+    number of distinct subdomains within the window -- see module note above.
+    Each entry: {"ip", "name", "parent_domain", "distinct_subdomains",
+    "query_count", "avg_prefix_length", "sample_subdomains"}, sorted by
+    distinct_subdomains descending.
+
+    `since` is hard-capped to TUNNELING_MAX_LOOKBACK_SECONDS, same
+    bounded-range-only contract as domain_fanout (never an "All" scan).
+    """
+    now = int(time.time())
+    until = until if until is not None else now
+    earliest = now - TUNNELING_MAX_LOOKBACK_SECONDS
+    since = earliest if since is None else max(since, earliest)
+
+    if detect_schema().has_id_storage:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT client, domain, COUNT(*) AS cnt FROM query_storage "
+                "WHERE timestamp >= ? AND timestamp < ? GROUP BY client, domain",
+                [since, until],
+            ).fetchall()
+            ipmap = _client_ip_map(conn)
+            dmap = _domain_text_map(conn)
+            resolved_pairs = [
+                (_resolve_client_value(r["client"], ipmap), _resolve_domain_value(r["domain"], dmap), r["cnt"])
+                for r in rows
+            ]
+            namemap = _client_name_map(conn)
+    else:
+        select, join = _client_join_sql()
+        client_col = _client_ip_col()
+        with _connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {client_col} AS ip, q.domain AS domain, COUNT(*) AS cnt
+                FROM queries q
+                {join}
+                WHERE q.timestamp >= ? AND q.timestamp < ?
+                GROUP BY {client_col}, q.domain
+                """,
+                [since, until],
+            ).fetchall()
+            resolved_pairs = [(r["ip"], r["domain"], r["cnt"]) for r in rows]
+            # Not every schema shape has a name-bearing network_addresses table
+            # in the shape _client_name_map assumes (see its own docstring --
+            # that's a "real"/idstore-only source); reuse the same select/join
+            # every other view-path function uses for names instead, same
+            # idiom as new_clients() above.
+            name_rows = conn.execute(
+                f"SELECT DISTINCT {select} FROM queries q {join} "
+                "WHERE q.timestamp >= ? AND q.timestamp < ?",
+                [since, until],
+            ).fetchall()
+            namemap = {r["client_ip"]: r["client_name"] for r in name_rows}
+
+    resolved = resolve.get_names()
+    manual = names.get_names()
+    groups = _tunneling_group(resolved_pairs)
+    out = [g for g in groups if g["distinct_subdomains"] >= min_distinct]
+    for g in out:
+        g["name"] = _display_name(namemap.get(g["ip"]), g["ip"], resolved, manual)
+    out.sort(key=lambda x: x["distinct_subdomains"], reverse=True)
+    return out[:limit]
+
+
 def slowest_domains(
     since: int | None, until: int | None, min_count: int = 5, limit: int = 15
 ) -> list[dict]:
@@ -2562,7 +2807,12 @@ def detect_anomalies() -> list[dict]:
                 "window_since": now - 3600, "window_until": now,
             })
 
-    anomalies.extend(_nxdomain_anomalies(now, baseline_start))
+    # One shared query for both NXDOMAIN-rate and latency stats -- see
+    # _windowed_client_stats's docstring for why this must stay a single
+    # query rather than the two independent ones each function used to run.
+    stats = _windowed_client_stats(now, baseline_start)
+    anomalies.extend(_nxdomain_anomalies(now, baseline_start, stats=stats))
+    anomalies.extend(_latency_anomalies(now, baseline_start, stats=stats))
     return anomalies
 
 
@@ -2588,14 +2838,22 @@ NXDOMAIN_MIN_FLOOR_RATE = 0.15    # ...AND clear an absolute 15% floor, so a cli
                                    # doesn't trip on a trivial 1% blip (0 * 3 = 0).
 
 
-def _nxdomain_anomalies(now: int, baseline_start: int) -> list[dict]:
-    """Per-client NXDOMAIN rate: baseline (everything from `baseline_start`
-    up to the recent window) vs. recent (last NXDOMAIN_WINDOW_HOURS). One
-    query, partitioned by a CASE on the recent-window boundary, for the same
-    reason detect_anomalies() batches its volume query: this must never add
-    a second full-table scan per client."""
+_ClientStats = tuple[dict[str, dict], dict[str, str | None]]
+
+
+def _windowed_client_stats(now: int, baseline_start: int) -> _ClientStats:
+    """One query shared by _nxdomain_anomalies and _latency_anomalies: both
+    partition the same baseline_start..now range by the same recent-window
+    boundary (NXDOMAIN_WINDOW_HOURS == LATENCY_WINDOW_HOURS), so their
+    per-client totals/nx-counts/reply-time sums can all come out of a single
+    CASE-partitioned GROUP BY q.client, is_recent -- see
+    _nxdomain_anomalies's docstring for why this must never become two
+    independent full-table scans per detect_anomalies() poll. Returns
+    ({}, {}) on schemas without has_id_storage (older client-table/
+    plain-TEXT layouts), same honest-scope precedent as elsewhere in this
+    file."""
     if not detect_schema().has_id_storage:
-        return []
+        return {}, {}
     recent_start = now - NXDOMAIN_WINDOW_HOURS * 3600
     with _connect() as conn:
         ipmap = _client_ip_map(conn)
@@ -2605,6 +2863,8 @@ def _nxdomain_anomalies(now: int, baseline_start: int) -> list[dict]:
             SELECT q.client AS cid,
                    CASE WHEN q.timestamp >= ? THEN 1 ELSE 0 END AS is_recent,
                    SUM(CASE WHEN q.reply_type = ? THEN 1 ELSE 0 END) AS nx,
+                   SUM(CASE WHEN q.reply_time IS NOT NULL THEN q.reply_time ELSE 0 END) AS total_reply,
+                   COUNT(CASE WHEN q.reply_time IS NOT NULL THEN 1 END) AS reply_count,
                    COUNT(*) AS total
             FROM query_storage q
             WHERE q.timestamp >= ?
@@ -2613,18 +2873,33 @@ def _nxdomain_anomalies(now: int, baseline_start: int) -> list[dict]:
             [recent_start, NXDOMAIN_REPLY_TYPE, baseline_start],
         ).fetchall()
 
-    per_client: dict[str, dict[str, int]] = {}
+    per_client: dict[str, dict[str, float]] = {}
     for r in rows:
         ip = _resolve_client_value(r["cid"], ipmap)
         if ip is None:
             continue
-        c = per_client.setdefault(ip, {"baseline_nx": 0, "baseline_total": 0, "recent_nx": 0, "recent_total": 0})
-        if r["is_recent"]:
-            c["recent_nx"] += r["nx"]
-            c["recent_total"] += r["total"]
-        else:
-            c["baseline_nx"] += r["nx"]
-            c["baseline_total"] += r["total"]
+        c = per_client.setdefault(ip, {
+            "baseline_nx": 0, "baseline_total": 0, "recent_nx": 0, "recent_total": 0,
+            "baseline_reply": 0.0, "recent_reply": 0.0, "baseline_reply_count": 0, "recent_reply_count": 0,
+        })
+        prefix = "recent" if r["is_recent"] else "baseline"
+        c[f"{prefix}_nx"] += r["nx"]
+        c[f"{prefix}_total"] += r["total"]
+        c[f"{prefix}_reply"] += r["total_reply"] or 0.0
+        c[f"{prefix}_reply_count"] += r["reply_count"]
+    return per_client, namemap
+
+
+def _nxdomain_anomalies(now: int, baseline_start: int, stats: _ClientStats | None = None) -> list[dict]:
+    """Per-client NXDOMAIN rate: baseline (everything from `baseline_start`
+    up to the recent window) vs. recent (last NXDOMAIN_WINDOW_HOURS). Shares
+    its query with _latency_anomalies via `stats` (see
+    _windowed_client_stats) -- pass nothing to run standalone (e.g. from a
+    direct unit test)."""
+    if not detect_schema().has_id_storage:
+        return []
+    recent_start = now - NXDOMAIN_WINDOW_HOURS * 3600
+    per_client, namemap = stats if stats is not None else _windowed_client_stats(now, baseline_start)
 
     resolved = resolve.get_names()
     manual = names.get_names()
@@ -2648,6 +2923,109 @@ def _nxdomain_anomalies(now: int, baseline_start: int) -> list[dict]:
             "window_since": recent_start, "window_until": now,
         })
     return anomalies
+
+
+# Upstream resolver latency-degradation (#4/#4b in the feature backlog):
+# "Slowest domains" (slowest_domains above) is passive/on-demand; nothing
+# turns Pi-hole's own per-query `reply_time` into a proactive signal on its
+# own baseline. Same normalized-schema-only gating as slowest_domains/
+# NXDOMAIN above (`reply_time` doesn't exist on older layouts at all).
+#
+# Split into two surfaces rather than one, because they genuinely don't fit
+# the same shape:
+#   - #4b (per-client): fits detect_anomalies()'s per-client list perfectly
+#     -- a device whose OWN resolution latency just got worse (flaky
+#     resolver switch, one segment's reachability issue) -- so it's wired in
+#     as another `kind` here, exactly like NXDOMAIN-rate above.
+#   - #4 (network-wide): does NOT fit that shape at all -- it's a single
+#     network-wide health fact, not one entry per client. Deliberately kept
+#     OUT of detect_anomalies() and served by its own small
+#     network_latency_health() below / GET /api/latency-health instead of
+#     being shoehorned into a per-client list with a fake ip.
+LATENCY_WINDOW_HOURS = 3        # matches NXDOMAIN_WINDOW_HOURS/SILENT_WINDOW_HOURS
+LATENCY_MIN_BASELINE_COUNT = 20
+LATENCY_MIN_RECENT_COUNT = 10
+LATENCY_DEGRADED_MULTIPLIER = 2.0   # recent avg must clear 2x baseline...
+LATENCY_MIN_FLOOR_MS = 50.0         # ...AND clear an absolute 50ms floor, so a
+                                     # near-zero baseline (a client mostly
+                                     # cache-hitting) doesn't trip on a trivial
+                                     # few-ms blip.
+
+
+def _latency_anomalies(now: int, baseline_start: int, stats: _ClientStats | None = None) -> list[dict]:
+    """Per-client resolution-latency degradation (#4b): baseline (everything
+    from `baseline_start` up to the recent window) vs. recent
+    (LATENCY_WINDOW_HOURS) average `reply_time`. Shares its query with
+    _nxdomain_anomalies via `stats` (see _windowed_client_stats) -- pass
+    nothing to run standalone (e.g. from a direct unit test)."""
+    if not detect_schema().has_id_storage:
+        return []
+    recent_start = now - LATENCY_WINDOW_HOURS * 3600
+    per_client, namemap = stats if stats is not None else _windowed_client_stats(now, baseline_start)
+
+    resolved = resolve.get_names()
+    manual = names.get_names()
+    anomalies: list[dict] = []
+    for ip, c in per_client.items():
+        if c["baseline_reply_count"] < LATENCY_MIN_BASELINE_COUNT or c["recent_reply_count"] < LATENCY_MIN_RECENT_COUNT:
+            continue
+        baseline_ms = 1000 * c["baseline_reply"] / c["baseline_reply_count"]
+        recent_ms = 1000 * c["recent_reply"] / c["recent_reply_count"]
+        threshold = max(baseline_ms * LATENCY_DEGRADED_MULTIPLIER, LATENCY_MIN_FLOOR_MS)
+        if recent_ms <= threshold:
+            continue
+        name = _display_name(namemap.get(ip), ip, resolved, manual)
+        anomalies.append({
+            "ip": ip, "name": name, "kind": "latency",
+            "baseline_avg": round(baseline_ms, 1),
+            "baseline_stddev": 0.0,  # not applicable to an average-latency metric
+            "current_value": round(recent_ms, 1),
+            "window_since": recent_start, "window_until": now,
+        })
+    return anomalies
+
+
+def network_latency_health(baseline_days: int = BASELINE_DAYS) -> dict | None:
+    """Network-wide resolver latency health (#4): whole-network baseline vs.
+    recent average `reply_time` -- see the module note above for why this is
+    NOT part of detect_anomalies()'s per-client list. Returns None when the
+    schema doesn't carry `reply_time` at all, or when either window doesn't
+    have enough samples to trust yet -- callers must treat that as "no
+    signal", not "not degraded"."""
+    if not detect_schema().has_id_storage:
+        return None
+    now = int(time.time())
+    recent_start = now - LATENCY_WINDOW_HOURS * 3600
+    baseline_start = now - baseline_days * 86400
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT CASE WHEN timestamp >= ? THEN 1 ELSE 0 END AS is_recent,
+                   SUM(reply_time) AS total_reply, COUNT(*) AS total
+            FROM query_storage
+            WHERE timestamp >= ? AND reply_time IS NOT NULL
+            GROUP BY is_recent
+            """,
+            [recent_start, baseline_start],
+        ).fetchall()
+    baseline_total = baseline_reply = recent_total = recent_reply = 0.0
+    for r in rows:
+        if r["is_recent"]:
+            recent_reply, recent_total = r["total_reply"] or 0.0, r["total"]
+        else:
+            baseline_reply, baseline_total = r["total_reply"] or 0.0, r["total"]
+    if baseline_total < LATENCY_MIN_BASELINE_COUNT or recent_total < LATENCY_MIN_RECENT_COUNT:
+        return None
+    baseline_ms = round(1000 * baseline_reply / baseline_total, 1)
+    recent_ms = round(1000 * recent_reply / recent_total, 1)
+    threshold = max(baseline_ms * LATENCY_DEGRADED_MULTIPLIER, LATENCY_MIN_FLOOR_MS)
+    return {
+        "baseline_avg_ms": baseline_ms,
+        "recent_avg_ms": recent_ms,
+        "degraded": recent_ms > threshold,
+        "window_since": recent_start,
+        "window_until": now,
+    }
 
 
 # Shared presence qualifier for "this client went quiet" events (#6/#7),

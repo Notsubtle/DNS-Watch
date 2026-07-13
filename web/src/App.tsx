@@ -39,6 +39,8 @@ import SimulatorTab from "./components/SimulatorTab";
 import ClientHeatmapTab from "./components/ClientHeatmapTab";
 import FanoutTab from "./components/FanoutTab";
 import TrendsTab from "./components/TrendsTab";
+import TunnelingTab from "./components/TunnelingTab";
+import ClientCompareTab from "./components/ClientCompareTab";
 
 // The smallest preset range (FilterBar only offers fixed buckets, no
 // arbitrary since/until) that fully contains an anomaly's detection window —
@@ -394,14 +396,21 @@ export default function App() {
 
       {view === "stream" && <LiveStreamTab />}
       {view === "simulator" && <SimulatorTab />}
-      {view === "heatmap" && <ClientHeatmapTab clients={clients} />}
+      {view === "heatmap" && <ClientHeatmapTab clients={clients} tags={tags} />}
       {view === "fanout" && <FanoutTab />}
       {view === "trends" && <TrendsTab />}
+      {view === "tunneling" && <TunnelingTab />}
+      {view === "compare" && <ClientCompareTab clients={clients} />}
 
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
 
       {deviceNamesOpen && (
-        <DeviceNamesModal onClose={() => setDeviceNamesOpen(false)} onChange={reloadClientNames} />
+        <DeviceNamesModal
+          onClose={() => setDeviceNamesOpen(false)}
+          onChange={reloadClientNames}
+          onTagsChange={reloadTags}
+          tags={tags}
+        />
       )}
 
       {tagsOpen && (

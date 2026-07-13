@@ -152,6 +152,19 @@ export interface DomainStatusChanges {
   newly_unblocked: DomainStatusChange[];
 }
 
+// DNS-tunneling/exfiltration detector (#2) -- one client emitting an
+// unusually high number of distinct subdomains under a single registered
+// parent domain. On-demand only, not an alert rule -- see db.tunneling_candidates.
+export interface TunnelingCandidate {
+  ip: string;
+  name: string;
+  parent_domain: string;
+  distinct_subdomains: number;
+  query_count: number;
+  avg_prefix_length: number;
+  sample_subdomains: string[];
+}
+
 // Period-over-period "what changed" comparison -- current N-day period vs.
 // the N days immediately before it.
 export interface DomainShift {
@@ -199,6 +212,28 @@ export interface NameChangeEntry {
   new_name: string | null;
 }
 
+// Per-client first-seen-domain (#1): domains this specific device has
+// queried for the first time recently, even if other clients queried them
+// long ago -- see rollups.client_new_domains.
+export interface DeviceNewDomain {
+  ip: string;
+  domain: string;
+  first_seen: number;
+}
+
+export interface DeviceNewDomains {
+  ready: boolean;
+  domains: DeviceNewDomain[];
+}
+
+// Unified per-device investigation timeline (#5) -- merges NameChangeEntry
+// and AlertEvent into one chronological feed via a "type" discriminator.
+// v1 scope note: anomaly detections are NOT included -- see the endpoint's
+// own docstring (db.detect_anomalies() has no persisted history to draw on).
+export type TimelineEntry =
+  | (Omit<NameChangeEntry, "type"> & { type: "name_change"; at: number })
+  | (Omit<AlertEvent, "type"> & { type: "alert_event"; at: number });
+
 export type RuleType =
   | "volume_threshold"
   | "new_device"
@@ -208,6 +243,7 @@ export type RuleType =
   | "doh_provider"
   | "digest"
   | "first_seen_domain"
+  | "client_first_seen_domain"
   | "correlated_new_device_domain"
   | "unusual_query_type";
 
@@ -248,6 +284,18 @@ export interface AlertEvent {
   domain: string | null;
 }
 
+// Permanent alert suppression (#6) -- distinct from the time-boxed snooze
+// above (SnoozeRequest via snoozeEvent). See alerts.add_suppression's
+// module note for what a null client_ip/domain means in each field.
+export interface AlertSuppression {
+  id: number;
+  rule_id: number;
+  rule_name: string | null;
+  client_ip: string | null;
+  domain: string | null;
+  created_at: number;
+}
+
 export interface AlertsResponse {
   evaluated_at: number;
   new: number;
@@ -273,6 +321,15 @@ export interface ClientDetail {
   mac_known: boolean;
   vendor: string | null;
   vendor_unknown_reason: "randomized" | "unlisted" | null;
+  // Domain lexical/entropy scoring (#3) -- soft "% of this device's distinct
+  // domains that look random/algorithmically generated" metric, computed
+  // over distinct domains (not query volume). See db.client_entropy_summary.
+  entropy: {
+    total_domains: number;
+    high_entropy_count: number;
+    pct_high_entropy: number;
+    sample_domains: string[];
+  };
 }
 
 export interface Anomaly {
@@ -280,9 +337,10 @@ export interface Anomaly {
   name: string;
   // "nxdomain": baseline_avg/current_value are a NXDOMAIN-rate PERCENTAGE
   // (0-100), not a queries/hr count like "silent"/"spike" use -- see
-  // db._nxdomain_anomalies(). baseline_stddev is always 0 for this kind
-  // (not applicable to a rate metric).
-  kind: "silent" | "spike" | "nxdomain";
+  // db._nxdomain_anomalies(). "latency" (#4b): baseline_avg/current_value are
+  // milliseconds -- see db._latency_anomalies(). Both leave baseline_stddev
+  // at 0 (not applicable to either metric).
+  kind: "silent" | "spike" | "nxdomain" | "latency";
   baseline_avg: number;
   baseline_stddev: number;
   current_value: number;
@@ -292,6 +350,16 @@ export interface Anomaly {
   // device_quiet alert rule would attach for this client, so the Alerts and
   // Anomalies panels never disagree about the same client going quiet.
   presence_note?: string;
+}
+
+// Network-wide resolver latency health (#4) -- deliberately NOT part of the
+// per-client Anomaly list above; see db.network_latency_health's module note.
+export interface LatencyHealth {
+  baseline_avg_ms: number;
+  recent_avg_ms: number;
+  degraded: boolean;
+  window_since: number;
+  window_until: number;
 }
 
 export type WebhookFormat = "generic" | "slack" | "discord";
@@ -322,6 +390,10 @@ export interface BackupRestoreSummary {
 export interface StorageStats {
   db_size_bytes: number;
   alert_events_count: number;
+  // Retention (#10) -- the two unbounded-growth rollup tables, previously
+  // undisclosed in this endpoint's response and un-prunable from the UI.
+  seen_domains_count: number;
+  domain_status_daily_count: number;
 }
 
 export interface AppSettingsUpdate {
@@ -494,6 +566,7 @@ export const api = {
     })}`,
 
   anomalies: () => getJson<Anomaly[]>("/api/anomalies"),
+  latencyHealth: () => getJson<LatencyHealth | null>("/api/latency-health"),
 
   // Underlying query events behind a single anomaly: this client, scoped to
   // the exact baseline-deviation window the anomaly was computed over.
@@ -517,6 +590,11 @@ export const api = {
   queryLatency: (range: string) =>
     getJson<QueryLatencyEntry[]>(`/api/query-latency${qs({ range })}`),
 
+  tunnelingCandidates: (range: string, minDistinct: number) =>
+    getJson<TunnelingCandidate[]>(
+      `/api/tunneling-candidates${qs({ range, min_distinct: minDistinct })}`
+    ),
+
   domainStatusChanges: (limit = 25) =>
     getJson<DomainStatusChanges>(`/api/domain-status-changes${qs({ limit })}`),
 
@@ -534,6 +612,25 @@ export const api = {
   clientHeatmapCell: (ip: string, weekday: number, hour: number, days = 7) =>
     getJson<QueryRow[]>(
       `/api/client/${encodeURIComponent(ip)}/heatmap/cell${qs({
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        weekday,
+        hour,
+        days,
+      })}`
+    ),
+
+  // Tag-scoped heatmap (#7) -- summed across every member of the tag.
+  tagHeatmap: (name: string, days = 7) =>
+    getJson<HeatmapResult>(
+      `/api/tags/${encodeURIComponent(name)}/heatmap${qs({
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        days,
+      })}`
+    ),
+
+  tagHeatmapCell: (name: string, weekday: number, hour: number, days = 7) =>
+    getJson<QueryRow[]>(
+      `/api/tags/${encodeURIComponent(name)}/heatmap/cell${qs({
         tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
         weekday,
         hour,
@@ -567,8 +664,18 @@ export const api = {
     sendJson<{ ip: string; name: string }>(`/api/device-names/${encodeURIComponent(ip)}`, "PUT", { name }),
   deleteDeviceName: (ip: string) =>
     sendJson<{ deleted: string }>(`/api/device-names/${encodeURIComponent(ip)}`, "DELETE"),
+  listSuppressions: () => getJson<AlertSuppression[]>("/api/alert-suppressions"),
+  createSuppression: (rule_id: number, client_ip: string | null, domain: string | null) =>
+    sendJson<AlertSuppression>("/api/alert-suppressions", "POST", { rule_id, client_ip, domain }),
+  deleteSuppression: (id: number) =>
+    sendJson<{ deleted: number }>(`/api/alert-suppressions/${id}`, "DELETE"),
+
   deviceNameHistory: (ip: string) =>
     getJson<NameChangeEntry[]>(`/api/device-names/${encodeURIComponent(ip)}/history`),
+  deviceNewDomains: (ip: string) =>
+    getJson<DeviceNewDomains>(`/api/device-names/${encodeURIComponent(ip)}/new-domains`),
+  deviceTimeline: (ip: string) =>
+    getJson<TimelineEntry[]>(`/api/device-names/${encodeURIComponent(ip)}/timeline`),
 
   listVendors: () => getJson<Vendor[]>("/api/vendors"),
 
@@ -602,4 +709,10 @@ export const api = {
     sendJson<{ deleted: number }>("/api/storage/prune-events", "POST", {
       older_than_days: olderThanDays,
     }),
+  pruneDomainHistory: (olderThanDays: number) =>
+    sendJson<{ seen_domains_deleted: number; domain_status_daily_deleted: number }>(
+      "/api/storage/prune-domain-history",
+      "POST",
+      { older_than_days: olderThanDays }
+    ),
 };

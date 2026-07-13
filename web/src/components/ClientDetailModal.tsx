@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, ClientDetail } from "../api";
+import { api, ClientDetail, DeviceNewDomain, TimelineEntry } from "../api";
 import SummaryCards from "./SummaryCards";
 import TimeSeriesChart from "./TimeSeriesChart";
 import TopList from "./TopList";
@@ -27,6 +27,12 @@ export default function ClientDetailModal({ ip, range, onClose }: Props) {
   const [data, setData] = useState<ClientDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Per-client first-seen-domain (#1) -- fetched separately from clientDetail
+  // since it's rollup-backed (may not be ready yet) rather than range-scoped;
+  // a failure/not-ready here shouldn't block the rest of the modal from
+  // rendering, so it's tracked independently and just renders nothing if unset.
+  const [newDomains, setNewDomains] = useState<DeviceNewDomain[] | null>(null);
+  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -40,6 +46,30 @@ export default function ClientDetailModal({ ip, range, onClose }: Props) {
       cancelled = true;
     };
   }, [ip, range]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setNewDomains(null);
+    api
+      .deviceNewDomains(ip)
+      .then((d) => !cancelled && setNewDomains(d.ready ? d.domains : []))
+      .catch(() => !cancelled && setNewDomains([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [ip]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setTimeline([]);
+    api
+      .deviceTimeline(ip)
+      .then((t) => !cancelled && setTimeline(t))
+      .catch(() => !cancelled && setTimeline([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [ip]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -84,6 +114,58 @@ export default function ClientDetailModal({ ip, range, onClose }: Props) {
               <TopList title="Top domains" entries={data.top_domains} />
               <QueryTypeBreakdown entries={data.query_types} />
             </div>
+
+            {data.entropy.total_domains > 0 && (
+              <div className="client-entropy-summary">
+                {data.entropy.pct_high_entropy}% of {data.entropy.total_domains} distinct domains
+                look high-entropy (random/algorithmically generated) — a soft signal, not a
+                confirmed finding
+                {data.entropy.sample_domains.length > 0 && (
+                  <>: {data.entropy.sample_domains.slice(0, 5).join(", ")}</>
+                )}
+              </div>
+            )}
+
+            {newDomains && newDomains.length > 0 && (
+              <div className="client-new-domains">
+                <h3 className="modal-section">New for this device (last 30d)</h3>
+                <ul>
+                  {newDomains.map((d) => (
+                    <li key={d.domain}>
+                      <span className="client-new-domain-name">{d.domain}</span>
+                      <span className="client-new-domain-time">{fmtDate(d.first_seen)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {timeline.length > 0 && (
+              <div className="client-timeline">
+                <h3 className="modal-section">Timeline</h3>
+                <p className="modal-sub">
+                  Name changes and fired alerts for this device, most recent first. Anomaly
+                  detections (silent/spike/NXDOMAIN/latency) aren't included — they're computed
+                  live and have no persisted history.
+                </p>
+                <ul>
+                  {timeline.map((t, i) => (
+                    <li key={i} className={`timeline-entry timeline-${t.type}`}>
+                      <span className="client-new-domain-time">{fmtDate(t.at)}</span>
+                      {t.type === "name_change" ? (
+                        <span>
+                          Name changed ({t.source}): {t.old_name ?? "(none)"} → {t.new_name ?? "(none)"}
+                        </span>
+                      ) : (
+                        <span>
+                          [{t.severity}] {t.message}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </>
         )}
       </div>

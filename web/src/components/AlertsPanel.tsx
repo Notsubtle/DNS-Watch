@@ -42,6 +42,10 @@ export default function AlertsPanel({
   // local optimism; the backend is the actual source of truth on the next
   // /api/alerts poll, which simply won't re-emit a snoozed dedup_key.
   const [snoozed, setSnoozed] = useState<Record<string, number>>({});
+  // Suppressions applied THIS session, keyed by event id -- same purely-local
+  // optimism as `snoozed` above; the review list in Settings is the real
+  // source of truth (#6).
+  const [suppressed, setSuppressed] = useState<Set<number>>(new Set());
   const [error, setError] = useState<string | null>(null);
 
   async function handleSnooze(e: AlertEvent, seconds: number) {
@@ -50,6 +54,17 @@ export default function AlertsPanel({
       const until = Math.floor(Date.now() / 1000) + seconds;
       await api.snoozeEvent(e.id, until);
       setSnoozed((prev) => ({ ...prev, [e.dedup_key]: until }));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleSuppress(e: AlertEvent) {
+    if (e.rule_id == null || (!e.client_ip && !e.domain)) return;
+    setError(null);
+    try {
+      await api.createSuppression(e.rule_id, e.client_ip, e.domain);
+      setSuppressed((prev) => new Set(prev).add(e.id));
     } catch (err) {
       setError((err as Error).message);
     }
@@ -121,6 +136,22 @@ export default function AlertsPanel({
                       </option>
                     ))}
                   </select>
+                )}
+                {(e.client_ip || e.domain) && (
+                  suppressed.has(e.id) ? (
+                    <span className="alert-snoozed" title="Won't fire again for this device/domain">
+                      Suppressed
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn-small"
+                      title="Permanently suppress this rule for this device/domain -- a known false positive, not a temporary snooze. Review suppressions in Settings."
+                      onClick={() => handleSuppress(e)}
+                    >
+                      Suppress
+                    </button>
+                  )
                 )}
               </li>
             );

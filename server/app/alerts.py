@@ -38,6 +38,7 @@ VALID_TYPES = {
     "volume_threshold", "new_device", "domain_keyword", "device_quiet",
     "new_vendor", "doh_provider", "digest", "first_seen_domain",
     "correlated_new_device_domain", "unusual_query_type",
+    "client_first_seen_domain",
 }
 
 # Webhook payload shapes. "generic" is DNS Watch's own JSON; "slack"/"discord"
@@ -57,6 +58,7 @@ DEFAULT_COOLDOWN = {
     "new_vendor": 86400,
     "doh_provider": 86400,
     "first_seen_domain": 86400,
+    "client_first_seen_domain": 86400,
     "correlated_new_device_domain": 86400,
     "unusual_query_type": 86400,
     # No entry for "digest": its firing is gated on a calendar-period
@@ -112,6 +114,26 @@ def init_store() -> None:
                 dedup_key TEXT PRIMARY KEY,
                 snoozed_until INTEGER NOT NULL
             );
+            -- Permanent suppression (#6 in the feature backlog) -- distinct
+            -- from alert_snoozes above, which is time-boxed (1h/24h/7d) and
+            -- keyed on one exact dedup_key (this SPECIFIC recurrence). This
+            -- is "this rule is a known false positive for this device/domain,
+            -- forever", keyed on the broader (rule_id, client_ip, domain)
+            -- shape so it matches EVERY future dedup_key that rule/client/
+            -- domain combination would ever produce, not just today's exact
+            -- key. client_ip/domain are each nullable independently:
+            -- (rule, ip, NULL) suppresses that rule for that device across
+            -- every domain; (rule, NULL, domain) suppresses it for that
+            -- domain across every device; (rule, ip, domain) suppresses only
+            -- that exact pairing.
+            CREATE TABLE IF NOT EXISTS alert_suppressions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_id INTEGER NOT NULL REFERENCES alert_rules(id) ON DELETE CASCADE,
+                client_ip TEXT,
+                domain TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_suppressions_rule ON alert_suppressions (rule_id);
             """
         )
         # client_ip/domain (#43) are added via ALTER rather than baked into
@@ -481,8 +503,12 @@ def update_rule(rule_id: int, *, name=None, enabled=None, params=None) -> dict |
 
 
 def delete_rule(rule_id: int) -> bool:
+    """A suppression for a deleted rule is dead weight, not a meaningful
+    "known false positive" anymore -- cascades via the FK, same pattern as
+    tags.py's delete_tag()."""
     init_store()
     with _connect() as conn:
+        conn.execute("PRAGMA foreign_keys=ON")
         cur = conn.execute("DELETE FROM alert_rules WHERE id = ?", (rule_id,))
         conn.commit()
     return cur.rowcount > 0
@@ -711,6 +737,29 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
                   f"New domain seen for the first time: {d['domain']}",
                   f"domain:{rule['id']}:{d['domain']}", domain=d["domain"])
 
+    elif rule["type"] == "client_first_seen_domain":
+        # Per-client sibling of first_seen_domain (#1 in the feature backlog):
+        # fires when a specific client queries a domain IT has never queried
+        # before, even if other clients queried that same domain long ago --
+        # first_seen_domain alone goes permanently quiet on a domain the
+        # instant any one device queries it, so a second device later
+        # reaching out to that same domain for the first time (a much
+        # stronger per-device signal, e.g. "this printer just started talking
+        # to a tracking domain") would otherwise be invisible. Backed by
+        # rollups.client_new_domains(), the per-client extension of
+        # client_domain_rollup -- same None-vs-[] "rollup not ready" contract
+        # as first_seen_domain above.
+        window_min = int(p.get("window_minutes", 1440))
+        since = now - window_min * 60
+        new_doms = rollups.client_new_domains(since)
+        if new_doms is None:
+            return
+        for d in new_doms:
+            _emit(pending, rule, "info",
+                  f"{d['ip']} queried a domain it has never queried before: {d['domain']}",
+                  f"clientdomain:{rule['id']}:{d['ip']}:{d['domain']}",
+                  client_ip=d["ip"], domain=d["domain"])
+
     elif rule["type"] == "correlated_new_device_domain":
         # A brand-new device querying a domain no client has EVER queried
         # before, close together in time, is a much stronger signal than
@@ -818,8 +867,9 @@ def _eval_rule(rule: dict, now: int, pending: list[dict]) -> None:
 # Only supported for rule types whose condition decomposes into fixed-size,
 # independently-checkable time windows: volume_threshold, domain_keyword,
 # device_quiet. The other rule types (new_device, new_vendor,
-# first_seen_domain, doh_provider, correlated_new_device_domain, digest) are
-# keyed on "did X newly appear" -- a single point-in-time fact evaluated
+# first_seen_domain, client_first_seen_domain, doh_provider,
+# correlated_new_device_domain, digest) are keyed on "did X newly appear" --
+# a single point-in-time fact evaluated
 # against live state (new_clients()/new_domains()'s "since" cursor), not a
 # repeatable per-window condition -- there's no honest way to answer "how many
 # times would this have fired" for those without re-deriving a full synthetic
@@ -951,6 +1001,8 @@ def evaluate() -> list[dict]:
     fired: list[dict] = []
     with _eval_lock, _connect() as conn:
         for ev in pending:
+            if _is_suppressed(conn, ev["rule_id"], ev.get("client_ip"), ev.get("domain")):
+                continue
             snoozed_until = _snoozed_until(conn, ev["dedup_key"])
             if snoozed_until and snoozed_until > now:
                 continue
@@ -1025,6 +1077,34 @@ def list_events(limit: int = 50) -> list[dict]:
     ]
 
 
+def events_for_client(ip: str, limit: int = 50) -> list[dict]:
+    """Most-recent-first fired events for ONE client (#5 in the feature
+    backlog) -- backs the unified per-device investigation timeline, which
+    merges this with name_history.history_for() into one chronological feed.
+    Same row shape as list_events(), just scoped by client_ip."""
+    init_store()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM alert_events WHERE client_ip = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+            (ip, limit),
+        ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "rule_id": r["rule_id"],
+            "rule_name": r["rule_name"],
+            "type": r["type"],
+            "severity": r["severity"],
+            "message": r["message"],
+            "created_at": r["created_at"],
+            "dedup_key": r["dedup_key"],
+            "client_ip": r["client_ip"],
+            "domain": r["domain"],
+        }
+        for r in rows
+    ]
+
+
 def snooze_event(event_id: int, until: int) -> dict | None:
     """Silence future recurrences of this specific fired event's dedup_key
     until `until` (unix ts), without touching the rule itself or any other
@@ -1068,3 +1148,66 @@ def _snoozed_until(conn: sqlite3.Connection, dedup_key: str) -> int | None:
         "SELECT snoozed_until FROM alert_snoozes WHERE dedup_key = ?", (dedup_key,)
     ).fetchone()
     return row["snoozed_until"] if row else None
+
+
+# --------------------------------------------------------------------------
+# Permanent suppression (#6) -- see alert_suppressions' own schema comment
+# for how this differs from alert_snoozes above.
+# --------------------------------------------------------------------------
+
+def add_suppression(rule_id: int, client_ip: str | None, domain: str | None) -> dict:
+    if client_ip is None and domain is None:
+        raise ValueError("suppression needs at least a client_ip or a domain -- "
+                          "suppressing a rule entirely should just disable the rule")
+    init_store()
+    with _connect() as conn:
+        row = conn.execute("SELECT id FROM alert_rules WHERE id = ?", (rule_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"no such rule: {rule_id}")
+        cur = conn.execute(
+            "INSERT INTO alert_suppressions (rule_id, client_ip, domain, created_at) VALUES (?,?,?,?)",
+            (rule_id, client_ip, domain, int(time.time())),
+        )
+        conn.commit()
+        sid = cur.lastrowid
+    return {"id": sid, "rule_id": rule_id, "client_ip": client_ip, "domain": domain}
+
+
+def list_suppressions() -> list[dict]:
+    """The review list a permanent suppression's own risk note calls for --
+    without this, a suppression added once could silently hide a real future
+    problem forever with no way to notice or revisit it."""
+    init_store()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT s.id, s.rule_id, r.name AS rule_name, s.client_ip, s.domain, s.created_at "
+            "FROM alert_suppressions s LEFT JOIN alert_rules r ON r.id = s.rule_id "
+            "ORDER BY s.created_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def remove_suppression(suppression_id: int) -> bool:
+    init_store()
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM alert_suppressions WHERE id = ?", (suppression_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def _is_suppressed(conn: sqlite3.Connection, rule_id: int, client_ip: str | None, domain: str | None) -> bool:
+    """True if ANY suppression row for this rule matches -- a row's own
+    NULL client_ip/domain is a wildcard for that dimension (see the schema
+    comment), so this checks all three shapes explicitly rather than relying
+    on SQL's NULL = NULL semantics (which would never match)."""
+    rows = conn.execute(
+        "SELECT client_ip, domain FROM alert_suppressions WHERE rule_id = ?", (rule_id,)
+    ).fetchall()
+    for r in rows:
+        sip, sdomain = r["client_ip"], r["domain"]
+        if sip is not None and sip != client_ip:
+            continue
+        if sdomain is not None and sdomain != domain:
+            continue
+        return True
+    return False
