@@ -4,6 +4,7 @@ import { api, DeviceNameRow, NameChangeEntry, Tag } from "../api";
 interface Props {
   onClose: () => void;
   onChange: () => void; // ask App to reload clients/summary after a rename
+  onTagsChange: () => void; // ask App to reload tags after a bulk-tag apply
   tags: Tag[];
 }
 
@@ -20,7 +21,7 @@ function describeChange(e: NameChangeEntry): string {
   return `${src}: "${e.old_name}" → "${e.new_name}"`;
 }
 
-export default function DeviceNamesModal({ onClose, onChange, tags }: Props) {
+export default function DeviceNamesModal({ onClose, onChange, onTagsChange, tags }: Props) {
   const [rows, setRows] = useState<DeviceNameRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -53,15 +54,31 @@ export default function DeviceNamesModal({ onClose, onChange, tags }: Props) {
     setSelected(new Set());
   }
 
+  // Reports per-device outcomes instead of failing the whole batch on one
+  // rejection: keeps only the failed ips selected so a retry is targeted,
+  // and surfaces which devices failed rather than one generic error.
+  async function applyBulk(ips: string[], run: (ip: string) => Promise<unknown>): Promise<string[]> {
+    const results = await Promise.allSettled(ips.map(run));
+    const failed = results
+      .map((r, i) => ({ r, ip: ips[i] }))
+      .filter((x) => x.r.status === "rejected")
+      .map((x) => x.ip);
+    if (failed.length > 0) {
+      setError(`Failed for ${failed.length} of ${ips.length} device(s): ${failed.join(", ")}`);
+      setSelected(new Set(failed));
+    } else {
+      clearSelection();
+    }
+    return failed;
+  }
+
   async function applyBulkTag() {
     if (!bulkTagId || selected.size === 0) return;
     setBulkBusy(true);
     setError(null);
     try {
-      await Promise.all([...selected].map((ip) => api.addTagMember(Number(bulkTagId), ip)));
-      clearSelection();
-    } catch (e) {
-      setError((e as Error).message);
+      await applyBulk([...selected], (ip) => api.addTagMember(Number(bulkTagId), ip));
+      onTagsChange();
     } finally {
       setBulkBusy(false);
     }
@@ -73,13 +90,10 @@ export default function DeviceNamesModal({ onClose, onChange, tags }: Props) {
     setBulkBusy(true);
     setError(null);
     try {
-      await Promise.all([...selected].map((ip) => api.setDeviceName(ip, name)));
-      setBulkName("");
-      clearSelection();
+      const failed = await applyBulk([...selected], (ip) => api.setDeviceName(ip, name));
+      if (failed.length === 0) setBulkName("");
       load();
       onChange();
-    } catch (e) {
-      setError((e as Error).message);
     } finally {
       setBulkBusy(false);
     }

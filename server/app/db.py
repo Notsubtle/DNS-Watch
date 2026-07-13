@@ -960,6 +960,7 @@ def _top_domains_id(client: str | list[str] | None, since: int | None, limit: in
 # Below this many characters, entropy is too noisy to mean anything (e.g. a
 # 4-character label has at most 2 bits/char of headroom just from being
 # short) -- short domains are never flagged regardless of their score.
+# keep in sync with HIGH_ENTROPY_MIN_LENGTH in web/src/entropy.ts
 DOMAIN_ENTROPY_MIN_LENGTH = 8
 # Shannon entropy, bits/char, over the label(s) sitting in front of the
 # registered parent domain. English words/hostnames typically land under
@@ -967,6 +968,7 @@ DOMAIN_ENTROPY_MIN_LENGTH = 8
 # as a conventional DGA-detection cutoff, not tuned against this app's own
 # data -- see the module note above on why this is a soft score, not a hard
 # alert threshold.
+# keep in sync with HIGH_ENTROPY_THRESHOLD in web/src/entropy.ts
 DOMAIN_ENTROPY_THRESHOLD = 3.3
 
 
@@ -1003,13 +1005,20 @@ def is_high_entropy_domain(domain: str | None) -> bool:
     return domain_entropy(domain) >= DOMAIN_ENTROPY_THRESHOLD
 
 
-def client_entropy_summary(ip: str, since: int | None = None, limit_domains: int = 500) -> dict:
+def client_entropy_summary(
+    ip: str, since: int | None = None, limit_domains: int = 500, domains: list[dict] | None = None
+) -> dict:
     """Per-client "% of this device's distinct domains that look
     high-entropy" (#3) -- computed over DISTINCT domains (via top_domains),
     not raw query volume, so a client hammering one high-entropy domain
     doesn't dominate the percentage the way a query-count-weighted average
-    would."""
-    domains = top_domains(ip, since, limit=limit_domains)
+    would.
+
+    `domains` lets a caller that already fetched top_domains(ip, since, ...)
+    (e.g. client_detail()) pass that list straight through instead of this
+    function re-running the same (ip, since) scan a second time."""
+    if domains is None:
+        domains = top_domains(ip, since, limit=limit_domains)
     named = [d["domain"] for d in domains if d["domain"] is not None]
     high = [d for d in named if is_high_entropy_domain(d)]
     total = len(named)
@@ -1595,16 +1604,20 @@ def client_detail(ip: str, since: int | None, until: int | None) -> dict:
         ).fetchone()
         vendor_fields = _vendor_fields(ip, _client_vendor_map(conn))
     name = _display_name(row["client_name"] if row else None, ip, resolve.get_names(), names.get_names())
+    # Fetched once at the wider limit and sliced for the response's own
+    # top_domains field, so client_entropy_summary() below doesn't re-run
+    # the same (ip, since) top_domains() scan a second time.
+    all_domains = top_domains(ip, since, limit=500)
     return {
         "ip": ip,
         "name": name,
         "first_seen": row["fs"] if row else None,
         "last_seen": row["ls"] if row else None,
         "summary": summary(ip, since, until),
-        "top_domains": top_domains(ip, since, limit=10),
+        "top_domains": all_domains[:10],
         "query_types": query_types(ip, since, until),
         "timeseries": timeseries(ip, since, until, buckets=40),
-        "entropy": client_entropy_summary(ip, since),
+        "entropy": client_entropy_summary(ip, since, domains=all_domains),
         **vendor_fields,
     }
 
@@ -1649,15 +1662,31 @@ def client_heatmap(client_ip: str | list[str], tz_name: str, days: int = 7) -> d
 
     _, join = _client_join_sql()
     where_sql, params = _build_where(client=client_ip, since=since, until=now)
+    # Bucket weekday/hour in SQL rather than pulling every row into Python --
+    # a tag-scoped grid (client_ip a list, #7) can otherwise mean scanning
+    # every member's full window just to increment a 7x24 grid. strftime
+    # treats its epoch argument as UTC, so shifting the raw timestamp by the
+    # already-computed local offset (same trick client_heatmap_cell uses)
+    # gives local wall-clock weekday/hour directly; SQLite's %w is
+    # Sunday=0..Saturday=6, remapped to Python's Monday=0..Sunday=6 below.
     with _connect() as conn:
         rows = conn.execute(
-            f"SELECT q.timestamp FROM queries q {join} WHERE {where_sql}", params
+            f"""
+            SELECT
+                CAST(strftime('%w', (q.timestamp + ?), 'unixepoch') AS INTEGER) AS dow,
+                CAST(strftime('%H', (q.timestamp + ?), 'unixepoch') AS INTEGER) AS hour,
+                COUNT(*) AS n
+            FROM queries q {join}
+            WHERE {where_sql}
+            GROUP BY dow, hour
+            """,
+            [offset, offset, *params],
         ).fetchall()
 
     grid = [[0] * 24 for _ in range(7)]
     for r in rows:
-        local_dt = datetime.fromtimestamp(r["timestamp"] + offset, tz=timezone.utc)
-        grid[local_dt.weekday()][local_dt.hour] += 1
+        weekday = (r["dow"] + 6) % 7
+        grid[weekday][r["hour"]] += r["n"]
 
     return {
         "tz": tz_name,
@@ -2778,8 +2807,12 @@ def detect_anomalies() -> list[dict]:
                 "window_since": now - 3600, "window_until": now,
             })
 
-    anomalies.extend(_nxdomain_anomalies(now, baseline_start))
-    anomalies.extend(_latency_anomalies(now, baseline_start))
+    # One shared query for both NXDOMAIN-rate and latency stats -- see
+    # _windowed_client_stats's docstring for why this must stay a single
+    # query rather than the two independent ones each function used to run.
+    stats = _windowed_client_stats(now, baseline_start)
+    anomalies.extend(_nxdomain_anomalies(now, baseline_start, stats=stats))
+    anomalies.extend(_latency_anomalies(now, baseline_start, stats=stats))
     return anomalies
 
 
@@ -2805,14 +2838,22 @@ NXDOMAIN_MIN_FLOOR_RATE = 0.15    # ...AND clear an absolute 15% floor, so a cli
                                    # doesn't trip on a trivial 1% blip (0 * 3 = 0).
 
 
-def _nxdomain_anomalies(now: int, baseline_start: int) -> list[dict]:
-    """Per-client NXDOMAIN rate: baseline (everything from `baseline_start`
-    up to the recent window) vs. recent (last NXDOMAIN_WINDOW_HOURS). One
-    query, partitioned by a CASE on the recent-window boundary, for the same
-    reason detect_anomalies() batches its volume query: this must never add
-    a second full-table scan per client."""
+_ClientStats = tuple[dict[str, dict], dict[str, str | None]]
+
+
+def _windowed_client_stats(now: int, baseline_start: int) -> _ClientStats:
+    """One query shared by _nxdomain_anomalies and _latency_anomalies: both
+    partition the same baseline_start..now range by the same recent-window
+    boundary (NXDOMAIN_WINDOW_HOURS == LATENCY_WINDOW_HOURS), so their
+    per-client totals/nx-counts/reply-time sums can all come out of a single
+    CASE-partitioned GROUP BY q.client, is_recent -- see
+    _nxdomain_anomalies's docstring for why this must never become two
+    independent full-table scans per detect_anomalies() poll. Returns
+    ({}, {}) on schemas without has_id_storage (older client-table/
+    plain-TEXT layouts), same honest-scope precedent as elsewhere in this
+    file."""
     if not detect_schema().has_id_storage:
-        return []
+        return {}, {}
     recent_start = now - NXDOMAIN_WINDOW_HOURS * 3600
     with _connect() as conn:
         ipmap = _client_ip_map(conn)
@@ -2822,6 +2863,8 @@ def _nxdomain_anomalies(now: int, baseline_start: int) -> list[dict]:
             SELECT q.client AS cid,
                    CASE WHEN q.timestamp >= ? THEN 1 ELSE 0 END AS is_recent,
                    SUM(CASE WHEN q.reply_type = ? THEN 1 ELSE 0 END) AS nx,
+                   SUM(CASE WHEN q.reply_time IS NOT NULL THEN q.reply_time ELSE 0 END) AS total_reply,
+                   COUNT(CASE WHEN q.reply_time IS NOT NULL THEN 1 END) AS reply_count,
                    COUNT(*) AS total
             FROM query_storage q
             WHERE q.timestamp >= ?
@@ -2830,18 +2873,33 @@ def _nxdomain_anomalies(now: int, baseline_start: int) -> list[dict]:
             [recent_start, NXDOMAIN_REPLY_TYPE, baseline_start],
         ).fetchall()
 
-    per_client: dict[str, dict[str, int]] = {}
+    per_client: dict[str, dict[str, float]] = {}
     for r in rows:
         ip = _resolve_client_value(r["cid"], ipmap)
         if ip is None:
             continue
-        c = per_client.setdefault(ip, {"baseline_nx": 0, "baseline_total": 0, "recent_nx": 0, "recent_total": 0})
-        if r["is_recent"]:
-            c["recent_nx"] += r["nx"]
-            c["recent_total"] += r["total"]
-        else:
-            c["baseline_nx"] += r["nx"]
-            c["baseline_total"] += r["total"]
+        c = per_client.setdefault(ip, {
+            "baseline_nx": 0, "baseline_total": 0, "recent_nx": 0, "recent_total": 0,
+            "baseline_reply": 0.0, "recent_reply": 0.0, "baseline_reply_count": 0, "recent_reply_count": 0,
+        })
+        prefix = "recent" if r["is_recent"] else "baseline"
+        c[f"{prefix}_nx"] += r["nx"]
+        c[f"{prefix}_total"] += r["total"]
+        c[f"{prefix}_reply"] += r["total_reply"] or 0.0
+        c[f"{prefix}_reply_count"] += r["reply_count"]
+    return per_client, namemap
+
+
+def _nxdomain_anomalies(now: int, baseline_start: int, stats: _ClientStats | None = None) -> list[dict]:
+    """Per-client NXDOMAIN rate: baseline (everything from `baseline_start`
+    up to the recent window) vs. recent (last NXDOMAIN_WINDOW_HOURS). Shares
+    its query with _latency_anomalies via `stats` (see
+    _windowed_client_stats) -- pass nothing to run standalone (e.g. from a
+    direct unit test)."""
+    if not detect_schema().has_id_storage:
+        return []
+    recent_start = now - NXDOMAIN_WINDOW_HOURS * 3600
+    per_client, namemap = stats if stats is not None else _windowed_client_stats(now, baseline_start)
 
     resolved = resolve.get_names()
     manual = names.get_names()
@@ -2894,53 +2952,25 @@ LATENCY_MIN_FLOOR_MS = 50.0         # ...AND clear an absolute 50ms floor, so a
                                      # few-ms blip.
 
 
-def _latency_anomalies(now: int, baseline_start: int) -> list[dict]:
+def _latency_anomalies(now: int, baseline_start: int, stats: _ClientStats | None = None) -> list[dict]:
     """Per-client resolution-latency degradation (#4b): baseline (everything
     from `baseline_start` up to the recent window) vs. recent
-    (LATENCY_WINDOW_HOURS) average `reply_time`. Same one-query,
-    CASE-partitioned shape as _nxdomain_anomalies -- see its own docstring
-    for why."""
+    (LATENCY_WINDOW_HOURS) average `reply_time`. Shares its query with
+    _nxdomain_anomalies via `stats` (see _windowed_client_stats) -- pass
+    nothing to run standalone (e.g. from a direct unit test)."""
     if not detect_schema().has_id_storage:
         return []
     recent_start = now - LATENCY_WINDOW_HOURS * 3600
-    with _connect() as conn:
-        ipmap = _client_ip_map(conn)
-        namemap = _client_name_map(conn)
-        rows = conn.execute(
-            """
-            SELECT q.client AS cid,
-                   CASE WHEN q.timestamp >= ? THEN 1 ELSE 0 END AS is_recent,
-                   SUM(q.reply_time) AS total_reply, COUNT(*) AS total
-            FROM query_storage q
-            WHERE q.timestamp >= ? AND q.reply_time IS NOT NULL
-            GROUP BY q.client, is_recent
-            """,
-            [recent_start, baseline_start],
-        ).fetchall()
-
-    per_client: dict[str, dict[str, float]] = {}
-    for r in rows:
-        ip = _resolve_client_value(r["cid"], ipmap)
-        if ip is None:
-            continue
-        c = per_client.setdefault(
-            ip, {"baseline_reply": 0.0, "baseline_total": 0, "recent_reply": 0.0, "recent_total": 0}
-        )
-        if r["is_recent"]:
-            c["recent_reply"] += r["total_reply"] or 0.0
-            c["recent_total"] += r["total"]
-        else:
-            c["baseline_reply"] += r["total_reply"] or 0.0
-            c["baseline_total"] += r["total"]
+    per_client, namemap = stats if stats is not None else _windowed_client_stats(now, baseline_start)
 
     resolved = resolve.get_names()
     manual = names.get_names()
     anomalies: list[dict] = []
     for ip, c in per_client.items():
-        if c["baseline_total"] < LATENCY_MIN_BASELINE_COUNT or c["recent_total"] < LATENCY_MIN_RECENT_COUNT:
+        if c["baseline_reply_count"] < LATENCY_MIN_BASELINE_COUNT or c["recent_reply_count"] < LATENCY_MIN_RECENT_COUNT:
             continue
-        baseline_ms = 1000 * c["baseline_reply"] / c["baseline_total"]
-        recent_ms = 1000 * c["recent_reply"] / c["recent_total"]
+        baseline_ms = 1000 * c["baseline_reply"] / c["baseline_reply_count"]
+        recent_ms = 1000 * c["recent_reply"] / c["recent_reply_count"]
         threshold = max(baseline_ms * LATENCY_DEGRADED_MULTIPLIER, LATENCY_MIN_FLOOR_MS)
         if recent_ms <= threshold:
             continue
