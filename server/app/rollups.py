@@ -1071,6 +1071,59 @@ def client_new_domains(after_ts: int, ip: str | None = None, limit: int = 200) -
 
 
 # --------------------------------------------------------------------------
+# Retention (#10 in the feature backlog): seen_domains and domain_status_daily
+# are both explicitly disclosed above (see their own CREATE TABLE comments) as
+# having "no retention policy in v1" -- domain cardinality is unbounded on a
+# busy/long-lived network, unlike the bounded-by-client-count rollup tables.
+# This is the housekeeping those comments called for, extending the same
+# prune-by-age control alerts.prune_events() already gives alert history.
+#
+# client_domain_rollup's first_seen column is deliberately NOT pruned here --
+# unlike the two tables below, it's not an append-only history log; it's a
+# live per-(client,domain) aggregate that read paths (top_domains,
+# client_new_domains) depend on for CURRENT totals, not just historical
+# first-seen dates, so aging out old rows would silently corrupt those reads
+# rather than just shrinking history.
+# --------------------------------------------------------------------------
+
+def storage_stats() -> dict:
+    """Row counts for the two unbounded-growth tables -- the same
+    "here's what's actually taking up space" visibility alerts.storage_stats()
+    already gives alert_events."""
+    init_rollup_store()
+    with _connect() as conn:
+        seen_domains_count = conn.execute("SELECT COUNT(*) FROM seen_domains").fetchone()[0]
+        domain_status_daily_count = conn.execute(
+            "SELECT COUNT(*) FROM domain_status_daily"
+        ).fetchone()[0]
+    return {
+        "seen_domains_count": seen_domains_count,
+        "domain_status_daily_count": domain_status_daily_count,
+    }
+
+
+def prune_domain_history(older_than_days: int) -> dict:
+    """Delete seen_domains rows older than `older_than_days` (by first_seen)
+    and domain_status_daily rows older than the same cutoff (by day). Returns
+    the count actually deleted from each table, same shape as
+    alerts.prune_events()'s single int return, just one per table since this
+    spans two."""
+    if type(older_than_days) is not int or older_than_days < 1:
+        raise ValueError("older_than_days must be a positive integer")
+    init_rollup_store()
+    cutoff_ts = int(time.time()) - older_than_days * 86400
+    cutoff_day = _day_str(cutoff_ts)
+    with _connect() as conn:
+        seen_cur = conn.execute("DELETE FROM seen_domains WHERE first_seen < ?", (cutoff_ts,))
+        # domain_status_daily's PRIMARY KEY is (domain, day) -- day strings are
+        # zero-padded ISO ("YYYY-MM-DD"), so a plain string comparison sorts
+        # chronologically the same as a numeric one would.
+        status_cur = conn.execute("DELETE FROM domain_status_daily WHERE day < ?", (cutoff_day,))
+        conn.commit()
+    return {"seen_domains_deleted": seen_cur.rowcount, "domain_status_daily_deleted": status_cur.rowcount}
+
+
+# --------------------------------------------------------------------------
 # Blocklist-effectiveness trend: retrospective complement to the Blocklist
 # Impact Simulator's forward-looking "what WOULD this regex block" -- this
 # looks backward at what actually started/stopped being blocked.

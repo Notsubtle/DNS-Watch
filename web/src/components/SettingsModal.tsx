@@ -55,6 +55,14 @@ export default function SettingsModal({ onClose }: Props) {
   const [pruning, setPruning] = useState(false);
   const [pruneResult, setPruneResult] = useState<string | null>(null);
 
+  // Retention for the two unbounded-growth rollup tables (#10) -- separate
+  // control from the alert-events one above, since these track different
+  // things (domain history, not alert firings) and shouldn't be silently
+  // conflated by reusing the same day input for both.
+  const [domainPruneDays, setDomainPruneDays] = useState("180");
+  const [domainPruning, setDomainPruning] = useState(false);
+  const [domainPruneResult, setDomainPruneResult] = useState<string | null>(null);
+
   // Permanent alert suppression review list (#6) -- without this, a
   // suppression added once could silently hide a real future problem forever.
   const [suppressions, setSuppressions] = useState<AlertSuppression[]>([]);
@@ -201,6 +209,29 @@ export default function SettingsModal({ onClose }: Props) {
       setStorageError((e as Error).message);
     } finally {
       setPruning(false);
+    }
+  }
+
+  async function pruneOldDomainHistory() {
+    const days = Math.floor(Number(domainPruneDays));
+    if (!Number.isFinite(days) || days < 1) {
+      setStorageError("Enter at least 1 day.");
+      return;
+    }
+    setDomainPruning(true);
+    setDomainPruneResult(null);
+    try {
+      const result = await api.pruneDomainHistory(days);
+      setDomainPruneResult(
+        `Deleted ${result.seen_domains_deleted} domain first-seen record(s) and ` +
+          `${result.domain_status_daily_deleted} domain-status-by-day record(s) older than ${days} days.`
+      );
+      setStorageError(null);
+      await loadStorageStats();
+    } catch (e) {
+      setStorageError((e as Error).message);
+    } finally {
+      setDomainPruning(false);
     }
   }
 
@@ -392,6 +423,22 @@ export default function SettingsModal({ onClose }: Props) {
                       : "0"}
                 </strong>
               </div>
+              <div>
+                <span className="settings-label">Domains tracked (first-seen)</span>
+                <strong>
+                  {storageStats ? storageStats.seen_domains_count.toLocaleString() : storageLoading ? "…" : "0"}
+                </strong>
+              </div>
+              <div>
+                <span className="settings-label">Domain-status-by-day rows</span>
+                <strong>
+                  {storageStats
+                    ? storageStats.domain_status_daily_count.toLocaleString()
+                    : storageLoading
+                      ? "…"
+                      : "0"}
+                </strong>
+              </div>
             </div>
             <label className="settings-field">
               <span className="settings-label">Delete events older than</span>
@@ -419,6 +466,35 @@ export default function SettingsModal({ onClose }: Props) {
             </div>
             {storageError && <div className="settings-test fail">{storageError}</div>}
             {pruneResult && <div className="settings-test ok">{pruneResult}</div>}
+
+            <label className="settings-field">
+              <span className="settings-label">Delete domain history older than</span>
+              <input
+                type="number"
+                className="settings-number"
+                min={1}
+                step={1}
+                value={domainPruneDays}
+                onChange={(e) => setDomainPruneDays(e.target.value)}
+              />
+              <span className="settings-hint">
+                Prunes the domain first-seen and domain-status-by-day tables (#10) -- both
+                unbounded on a busy/long-lived network. Does not affect current top-domains or
+                per-client totals, only historical first-seen/status-by-day records.
+              </span>
+            </label>
+            <div className="settings-actions">
+              <button
+                className="btn-small"
+                onClick={pruneOldDomainHistory}
+                disabled={
+                  domainPruning || !Number.isFinite(Number(domainPruneDays)) || Number(domainPruneDays) < 1
+                }
+              >
+                {domainPruning ? "Pruning…" : "Prune domain history"}
+              </button>
+            </div>
+            {domainPruneResult && <div className="settings-test ok">{domainPruneResult}</div>}
           </div>
         )}
       </div>

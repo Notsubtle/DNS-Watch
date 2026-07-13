@@ -686,13 +686,24 @@ def api_test_webhook(body: WebhookTest):
 
 @app.get("/api/storage-stats")
 def api_storage_stats():
-    return alerts.storage_stats()
+    return {**alerts.storage_stats(), **rollups.storage_stats()}
 
 
 @app.post("/api/storage/prune-events")
 def api_prune_events(body: PruneEventsRequest):
     try:
         return {"deleted": alerts.prune_events(body.older_than_days)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/storage/prune-domain-history")
+def api_prune_domain_history(body: PruneEventsRequest):
+    """Retention for the two unbounded-growth rollup tables (#10) --
+    seen_domains and domain_status_daily, both explicitly disclosed as
+    having no retention policy in v1. See rollups.prune_domain_history."""
+    try:
+        return rollups.prune_domain_history(body.older_than_days)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

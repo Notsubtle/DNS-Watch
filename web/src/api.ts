@@ -390,6 +390,10 @@ export interface BackupRestoreSummary {
 export interface StorageStats {
   db_size_bytes: number;
   alert_events_count: number;
+  // Retention (#10) -- the two unbounded-growth rollup tables, previously
+  // undisclosed in this endpoint's response and un-prunable from the UI.
+  seen_domains_count: number;
+  domain_status_daily_count: number;
 }
 
 export interface AppSettingsUpdate {
@@ -705,4 +709,10 @@ export const api = {
     sendJson<{ deleted: number }>("/api/storage/prune-events", "POST", {
       older_than_days: olderThanDays,
     }),
+  pruneDomainHistory: (olderThanDays: number) =>
+    sendJson<{ seen_domains_deleted: number; domain_status_daily_deleted: number }>(
+      "/api/storage/prune-domain-history",
+      "POST",
+      { older_than_days: olderThanDays }
+    ),
 };
