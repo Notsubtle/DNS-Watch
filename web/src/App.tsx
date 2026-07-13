@@ -40,6 +40,7 @@ import ClientHeatmapTab from "./components/ClientHeatmapTab";
 import FanoutTab from "./components/FanoutTab";
 import TrendsTab from "./components/TrendsTab";
 import TunnelingTab from "./components/TunnelingTab";
+import ClientCompareTab from "./components/ClientCompareTab";
 
 // The smallest preset range (FilterBar only offers fixed buckets, no
 // arbitrary since/until) that fully contains an anomaly's detection window —
@@ -399,6 +400,7 @@ export default function App() {
       {view === "fanout" && <FanoutTab />}
       {view === "trends" && <TrendsTab />}
       {view === "tunneling" && <TunnelingTab />}
+      {view === "compare" && <ClientCompareTab clients={clients} />}
 
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
 

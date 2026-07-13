@@ -1,4 +1,12 @@
-export type View = "dashboard" | "stream" | "simulator" | "heatmap" | "fanout" | "trends" | "tunneling";
+export type View =
+  | "dashboard"
+  | "stream"
+  | "simulator"
+  | "heatmap"
+  | "fanout"
+  | "trends"
+  | "tunneling"
+  | "compare";
 
 const TABS: { id: View; label: string }[] = [
   { id: "dashboard", label: "Dashboard" },
@@ -8,6 +16,7 @@ const TABS: { id: View; label: string }[] = [
   { id: "fanout", label: "Domain Fan-out" },
   { id: "trends", label: "Trends" },
   { id: "tunneling", label: "Tunneling Detector" },
+  { id: "compare", label: "Compare Clients" },
 ];
 
 interface Props {
