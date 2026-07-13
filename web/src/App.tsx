@@ -292,7 +292,12 @@ export default function App() {
             <span className="live-dot" />
             DNS Watch
           </h1>
-          <div className="subtitle">Live per-client DNS activity from Pi-hole</div>
+          <div className="subtitle">
+            Live per-client DNS activity from Pi-hole
+            {import.meta.env.VITE_ENV_LABEL && (
+              <span className="env-badge">{import.meta.env.VITE_ENV_LABEL}</span>
+            )}
+          </div>
         </div>
         <div className="header-actions">
           <button className="btn-small" onClick={() => setDeviceNamesOpen(true)}>

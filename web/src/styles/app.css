@@ -35,6 +35,20 @@ body {
   font-size: 13px;
 }
 
+.env-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: #fff;
+  background: var(--ink-red);
+  vertical-align: middle;
+}
+
 .header-actions {
   display: flex;
   align-items: center;
