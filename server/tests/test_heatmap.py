@@ -10,7 +10,40 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
-from conftest import CLIENTS, insert_queries_at_timestamp
+import sqlite3
+
+from conftest import CLIENTS, _idstore_client_id, _idstore_domain_id, insert_queries_at_timestamp
+
+
+def _insert_for_ip(ftl, ip: str, name: str, ts: float, n: int) -> None:
+    """Same shape as insert_queries_at_timestamp, but for an ARBITRARY ip --
+    that helper is hardcoded to CLIENTS[0], which can't exercise a
+    multi-client tag scope."""
+    conn = sqlite3.connect(ftl["path"])
+    c = conn.cursor()
+    for i in range(n):
+        domain = f"tagburst-{ip}-{i}.example.com"
+        if ftl["schema"] == "idstore":
+            cid = _idstore_client_id(c, ip, name)
+            did = _idstore_domain_id(c, domain)
+            c.execute(
+                "INSERT INTO query_storage (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                (ts, 1, 2, did, cid),
+            )
+        elif ftl["schema"] == "new":
+            cid = next(i for i, (cip, _) in enumerate(CLIENTS, 1) if cip == ip)
+            c.execute(
+                "INSERT INTO queries (timestamp,type,status,domain,client_id) VALUES (?,?,?,?,?)",
+                (ts, 1, 2, domain, cid),
+            )
+        else:  # "old" / "real"
+            stored_ts = float(ts) if ftl["schema"] == "real" else int(ts)
+            c.execute(
+                "INSERT INTO queries (timestamp,type,status,domain,client) VALUES (?,?,?,?,?)",
+                (stored_ts, 1, 2, domain, ip),
+            )
+    conn.commit()
+    conn.close()
 
 
 def test_known_timestamp_buckets_into_expected_weekday_and_hour(ftl):
@@ -94,6 +127,73 @@ def test_drilldown_invalid_weekday_or_hour_raises_value_error(ftl):
         db.client_heatmap_cell(ip, "UTC", weekday=7, hour=0)
     with pytest.raises(ValueError):
         db.client_heatmap_cell(ip, "UTC", weekday=0, hour=24)
+
+
+def test_tag_scoped_heatmap_sums_across_members(ftl):
+    """#7: a tag's heatmap must equal the SUM of its members' individual
+    heatmaps, cell by cell -- proves list-based client_heatmap() isn't just
+    scoping to one arbitrary member."""
+    from app import db
+
+    ip_a, name_a = CLIENTS[0]
+    ip_b, name_b = CLIENTS[1]
+    ts = time.time() - 5 * 3600
+    _insert_for_ip(ftl, ip_a, name_a, ts, n=2)
+    _insert_for_ip(ftl, ip_b, name_b, ts, n=3)
+
+    combined = db.client_heatmap([ip_a, ip_b], "UTC", days=7)
+    a = db.client_heatmap(ip_a, "UTC", days=7)
+    b = db.client_heatmap(ip_b, "UTC", days=7)
+
+    for weekday in range(7):
+        for hour in range(24):
+            assert combined["grid"][weekday][hour] == a["grid"][weekday][hour] + b["grid"][weekday][hour]
+
+
+def test_tag_heatmap_cell_drilldown_is_multi_client_aware(ftl):
+    from app import db
+
+    ip_a, name_a = CLIENTS[0]
+    ip_b, name_b = CLIENTS[1]
+    ts = time.time() - 5 * 3600
+    _insert_for_ip(ftl, ip_a, name_a, ts, n=2)
+    _insert_for_ip(ftl, ip_b, name_b, ts, n=3)
+
+    expected = datetime.fromtimestamp(ts, tz=timezone.utc)
+    rows = db.client_heatmap_cell([ip_a, ip_b], "UTC", expected.weekday(), expected.hour, days=7)
+    seen_ips = {r["client_ip"] for r in rows}
+    assert {ip_a, ip_b} <= seen_ips
+    assert len(rows) == 5
+
+
+def test_api_tag_heatmap_endpoint(client, ftl):
+    from app import tags
+
+    ip_a, ip_b = CLIENTS[0][0], CLIENTS[1][0]
+    tag = tags.create_tag("iot")
+    tags.add_member(tag["id"], ip_a)
+    tags.add_member(tag["id"], ip_b)
+
+    resp = client.get("/api/tags/iot/heatmap", params={"tz": "UTC"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["grid"]) == 7 and all(len(row) == 24 for row in body["grid"])
+
+
+def test_api_tag_heatmap_unknown_tag_404s(client, ftl):
+    resp = client.get("/api/tags/nope/heatmap", params={"tz": "UTC"})
+    assert resp.status_code == 404
+
+
+def test_api_tag_heatmap_cell_endpoint(client, ftl):
+    from app import tags
+
+    tag = tags.create_tag("iot2")
+    tags.add_member(tag["id"], CLIENTS[0][0])
+
+    resp = client.get("/api/tags/iot2/heatmap/cell", params={"tz": "UTC", "weekday": 0, "hour": 0})
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
 
 
 def test_api_heatmap_endpoint_returns_full_shape(client):

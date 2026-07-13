@@ -395,7 +395,7 @@ export default function App() {
 
       {view === "stream" && <LiveStreamTab />}
       {view === "simulator" && <SimulatorTab />}
-      {view === "heatmap" && <ClientHeatmapTab clients={clients} />}
+      {view === "heatmap" && <ClientHeatmapTab clients={clients} tags={tags} />}
       {view === "fanout" && <FanoutTab />}
       {view === "trends" && <TrendsTab />}
       {view === "tunneling" && <TunnelingTab />}

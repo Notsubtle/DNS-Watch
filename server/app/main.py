@@ -403,6 +403,37 @@ def api_client_heatmap_cell(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.get("/api/tags/{name}/heatmap")
+def api_tag_heatmap(name: str, tz: str, days: int = Query(7, ge=1, le=30)):
+    """7x24 activity grid summed across every member of tag `name` (#7) --
+    the tag-scoped sibling of /api/client/{ip}/heatmap. 404s for an unknown
+    tag, same as the dashboard's other tag-scoped filters."""
+    ips = tags.get_tag_ips(name)
+    if ips is None:
+        raise HTTPException(status_code=404, detail=f"no such tag: {name!r}")
+    try:
+        return db.client_heatmap(ips, tz, days)
+    except ZoneInfoNotFoundError:
+        raise HTTPException(status_code=400, detail="Unknown timezone")
+
+
+@app.get("/api/tags/{name}/heatmap/cell")
+def api_tag_heatmap_cell(
+    name: str, tz: str, weekday: int, hour: int, days: int = Query(7, ge=1, le=30)
+):
+    """The exact rows behind one tag-scoped heatmap cell -- each row carries
+    its own client_ip/client_name, so this is automatically multi-client-aware."""
+    ips = tags.get_tag_ips(name)
+    if ips is None:
+        raise HTTPException(status_code=404, detail=f"no such tag: {name!r}")
+    try:
+        return db.client_heatmap_cell(ips, tz, weekday, hour, days)
+    except ZoneInfoNotFoundError:
+        raise HTTPException(status_code=400, detail="Unknown timezone")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/api/summary")
 def api_summary(
     client: str | None = None, tag: str | None = None, vendor: str | None = None,

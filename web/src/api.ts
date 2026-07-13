@@ -615,6 +615,25 @@ export const api = {
       })}`
     ),
 
+  // Tag-scoped heatmap (#7) -- summed across every member of the tag.
+  tagHeatmap: (name: string, days = 7) =>
+    getJson<HeatmapResult>(
+      `/api/tags/${encodeURIComponent(name)}/heatmap${qs({
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        days,
+      })}`
+    ),
+
+  tagHeatmapCell: (name: string, weekday: number, hour: number, days = 7) =>
+    getJson<QueryRow[]>(
+      `/api/tags/${encodeURIComponent(name)}/heatmap/cell${qs({
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        weekday,
+        hour,
+        days,
+      })}`
+    ),
+
   alerts: (limit = 50) => getJson<AlertsResponse>(`/api/alerts${qs({ limit })}`),
   snoozeEvent: (id: number, until: number) =>
     sendJson<{ dedup_key: string; snoozed_until: number }>(

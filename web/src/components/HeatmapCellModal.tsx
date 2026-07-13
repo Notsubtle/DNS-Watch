@@ -27,7 +27,11 @@ function formatHourRange(hour: number): string {
 }
 
 interface Props {
-  ip: string;
+  // Exactly one of ip/tag is set -- tag (#7) drills into a tag-scoped
+  // heatmap cell (multi-client-aware: a Client column is shown) instead of
+  // a single client's.
+  ip?: string;
+  tag?: string;
   clientName: string;
   weekday: number;
   hour: number;
@@ -36,7 +40,7 @@ interface Props {
 
 // Modeled on DrilldownModal.tsx's fetch-on-mount / loading-error / Escape-to-
 // close / capped-table pattern, scoped to one heatmap cell instead of one domain.
-export default function HeatmapCellModal({ ip, clientName, weekday, hour, onClose }: Props) {
+export default function HeatmapCellModal({ ip, tag, clientName, weekday, hour, onClose }: Props) {
   const [rows, setRows] = useState<QueryRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -44,8 +48,8 @@ export default function HeatmapCellModal({ ip, clientName, weekday, hour, onClos
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    api
-      .clientHeatmapCell(ip, weekday, hour)
+    const req = tag ? api.tagHeatmapCell(tag, weekday, hour) : api.clientHeatmapCell(ip!, weekday, hour);
+    req
       .then((r) => {
         if (cancelled) return;
         setRows(r);
@@ -56,7 +60,7 @@ export default function HeatmapCellModal({ ip, clientName, weekday, hour, onClos
     return () => {
       cancelled = true;
     };
-  }, [ip, weekday, hour]);
+  }, [ip, tag, weekday, hour]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -89,6 +93,7 @@ export default function HeatmapCellModal({ ip, clientName, weekday, hour, onClos
               <thead>
                 <tr>
                   <th>Time</th>
+                  {tag && <th>Client</th>}
                   <th>Domain</th>
                   <th>Type</th>
                   <th>Status</th>
@@ -98,6 +103,7 @@ export default function HeatmapCellModal({ ip, clientName, weekday, hour, onClos
                 {rows.slice(0, 50).map((r, i) => (
                   <tr key={`${r.timestamp}-${i}`}>
                     <td>{formatTime(r.timestamp)}</td>
+                    {tag && <td title={r.client_ip}>{r.client_name}</td>}
                     <td title={r.domain}>{r.domain}</td>
                     <td>{r.query_type}</td>
                     <td>
@@ -107,7 +113,7 @@ export default function HeatmapCellModal({ ip, clientName, weekday, hour, onClos
                 ))}
                 {rows.length === 0 && (
                   <tr>
-                    <td colSpan={4}>No queries in this window.</td>
+                    <td colSpan={tag ? 5 : 4}>No queries in this window.</td>
                   </tr>
                 )}
               </tbody>

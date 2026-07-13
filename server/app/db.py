@@ -1631,9 +1631,13 @@ def _local_offset_seconds(tz_name: str) -> float:
     return datetime.now(tz).utcoffset().total_seconds()
 
 
-def client_heatmap(client_ip: str, tz_name: str, days: int = 7) -> dict:
-    """One client's queries bucketed into a 7(weekday) x 24(hour) grid, in
-    the caller's local time (see `_local_offset_seconds`).
+def client_heatmap(client_ip: str | list[str], tz_name: str, days: int = 7) -> dict:
+    """One client's (or, #7 in the feature backlog, a whole tag's COMBINED)
+    queries bucketed into a 7(weekday) x 24(hour) grid, in the caller's local
+    time (see `_local_offset_seconds`). `client_ip` accepts a list the same
+    way `_build_where` already does elsewhere (#31) -- summed into one grid,
+    not one grid per member; that's the simplest v1 shape (a per-member
+    overlay is a real alternative, just a bigger UI lift for a first cut).
 
     `weekday` follows Python's `datetime.weekday()` convention: Monday=0,
     Sunday=6 — the frontend must use the same convention when labeling rows,
@@ -1664,10 +1668,14 @@ def client_heatmap(client_ip: str, tz_name: str, days: int = 7) -> dict:
 
 
 def client_heatmap_cell(
-    client_ip: str, tz_name: str, weekday: int, hour: int, days: int = 7
+    client_ip: str | list[str], tz_name: str, weekday: int, hour: int, days: int = 7
 ) -> list[dict]:
     """The exact rows behind one heatmap cell — built on top of the existing
     `list_queries()` rather than a new query shape, per the task plan.
+    `client_ip` accepts a tag's member-ip list the same way client_heatmap()
+    above does (#7); each returned row already carries its own client_ip/
+    client_name, so a tag-scoped drill-down is automatically multi-client-
+    aware -- no extra plumbing needed to know WHICH member(s) hit a cell.
 
     Uses the SAME offset computation as `client_heatmap()` (never re-derived
     here) so the two can never silently drift apart. A window wider than 7
