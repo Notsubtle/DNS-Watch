@@ -1298,7 +1298,7 @@ tr:hover td {
 
 .device-name-list li {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 12px;
   padding: 8px 0;
@@ -1307,6 +1307,21 @@ tr:hover td {
 
 .device-name-list li.stale {
   opacity: 0.7;
+}
+
+.device-name-checkbox {
+  margin: 0;
+}
+
+.bulk-actions-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--ink-border);
+  font-size: 13px;
 }
 
 .device-name-info {

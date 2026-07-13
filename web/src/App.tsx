@@ -405,7 +405,7 @@ export default function App() {
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
 
       {deviceNamesOpen && (
-        <DeviceNamesModal onClose={() => setDeviceNamesOpen(false)} onChange={reloadClientNames} />
+        <DeviceNamesModal onClose={() => setDeviceNamesOpen(false)} onChange={reloadClientNames} tags={tags} />
       )}
 
       {tagsOpen && (

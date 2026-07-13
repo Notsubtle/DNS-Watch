@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, DeviceNameRow, NameChangeEntry } from "../api";
+import { api, DeviceNameRow, NameChangeEntry, Tag } from "../api";
 
 interface Props {
   onClose: () => void;
   onChange: () => void; // ask App to reload clients/summary after a rename
+  tags: Tag[];
 }
 
 function fmtChangeTime(ts: number): string {
@@ -19,7 +20,7 @@ function describeChange(e: NameChangeEntry): string {
   return `${src}: "${e.old_name}" → "${e.new_name}"`;
 }
 
-export default function DeviceNamesModal({ onClose, onChange }: Props) {
+export default function DeviceNamesModal({ onClose, onChange, tags }: Props) {
   const [rows, setRows] = useState<DeviceNameRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -31,6 +32,58 @@ export default function DeviceNamesModal({ onClose, onChange }: Props) {
   const [historyOpenIp, setHistoryOpenIp] = useState<string | null>(null);
   const [historyByIp, setHistoryByIp] = useState<Record<string, NameChangeEntry[]>>({});
   const [historyLoadingIp, setHistoryLoadingIp] = useState<string | null>(null);
+
+  // Bulk actions (#9) -- multi-select rows, then apply a tag or a shared name
+  // to every selected device at once, instead of one row at a time.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkTagId, setBulkTagId] = useState("");
+  const [bulkName, setBulkName] = useState("");
+  const [bulkBusy, setBulkBusy] = useState(false);
+
+  function toggleSelected(ip: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(ip)) next.delete(ip);
+      else next.add(ip);
+      return next;
+    });
+  }
+
+  function clearSelection() {
+    setSelected(new Set());
+  }
+
+  async function applyBulkTag() {
+    if (!bulkTagId || selected.size === 0) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      await Promise.all([...selected].map((ip) => api.addTagMember(Number(bulkTagId), ip)));
+      clearSelection();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function applyBulkName() {
+    const name = bulkName.trim();
+    if (!name || selected.size === 0) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      await Promise.all([...selected].map((ip) => api.setDeviceName(ip, name)));
+      setBulkName("");
+      clearSelection();
+      load();
+      onChange();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
 
   function toggleHistory(ip: string) {
     if (historyOpenIp === ip) {
@@ -146,12 +199,53 @@ export default function DeviceNamesModal({ onClose, onChange }: Props) {
         {error && <div className="error-banner">{error}</div>}
         {loading && <div className="modal-sub">Loading…</div>}
 
+        {selected.size > 0 && (
+          <div className="bulk-actions-bar">
+            <span>{selected.size} selected</span>
+            {tags.length > 0 && (
+              <>
+                <select value={bulkTagId} onChange={(e) => setBulkTagId(e.target.value)}>
+                  <option value="">Apply tag…</option>
+                  {tags.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      🏷 {t.name}
+                    </option>
+                  ))}
+                </select>
+                <button className="btn-small" disabled={bulkBusy || !bulkTagId} onClick={applyBulkTag}>
+                  Apply
+                </button>
+              </>
+            )}
+            <input
+              type="text"
+              placeholder="Bulk-name selected devices…"
+              value={bulkName}
+              onChange={(e) => setBulkName(e.target.value)}
+              maxLength={100}
+            />
+            <button className="btn-small" disabled={bulkBusy || !bulkName.trim()} onClick={applyBulkName}>
+              Apply
+            </button>
+            <button className="btn-small" onClick={clearSelection}>
+              Clear selection
+            </button>
+          </div>
+        )}
+
         <ul className="device-name-list">
           {sorted.map((r) => {
             const isEditing = r.ip in editing;
             const busy = savingIp === r.ip;
             return (
               <li key={r.ip} className={r.seen ? "" : "stale"}>
+                <input
+                  type="checkbox"
+                  className="device-name-checkbox"
+                  checked={selected.has(r.ip)}
+                  onChange={() => toggleSelected(r.ip)}
+                  aria-label={`Select ${r.ip}`}
+                />
                 <div className="device-name-info">
                   <span className="device-name-ip" title={r.ip}>
                     {r.ip}
