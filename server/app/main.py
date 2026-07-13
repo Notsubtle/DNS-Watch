@@ -533,6 +533,36 @@ def api_period_comparison(days: int = Query(7, ge=1, le=90)):
     return {"ready": True, **result}
 
 
+@app.get("/api/device-names/{ip}/timeline")
+def api_device_timeline(ip: str, limit: int = Query(50, ge=1, le=200)):
+    """Unified per-device investigation timeline (#5) -- merges name-change
+    history and fired alert events into one chronological feed, each entry
+    tagged with a "type" discriminator ("name_change" | "alert_event") so the
+    frontend can render each shape appropriately.
+
+    v1 scope note: anomaly detections (silent/spike/nxdomain/latency) are
+    deliberately NOT included -- detect_anomalies() is stateless/live-only
+    (see its own module note), nothing persists a history of past anomaly
+    detections the way alert_events does for rules. Adding that would need a
+    new persistence layer, out of scope here -- same kind of explicit v1
+    punt as name_history's own "Pi-hole's own name changes aren't tracked"
+    note."""
+    # Spread the source row FIRST, then override "type"/"at" -- alert_events
+    # rows already have their own "type" (the alert RULE type, e.g.
+    # "new_device"), which would silently clobber this discriminator if the
+    # override came first.
+    changes = [
+        {**c, "type": "name_change", "at": c["changed_at"]}
+        for c in name_history.history_for(ip, limit)
+    ]
+    events = [
+        {**e, "type": "alert_event", "at": e["created_at"]}
+        for e in alerts.events_for_client(ip, limit)
+    ]
+    merged = sorted(changes + events, key=lambda e: e["at"], reverse=True)
+    return merged[:limit]
+
+
 @app.get("/api/device-names/{ip}/new-domains")
 def api_device_new_domains(ip: str, days: int = Query(30, ge=1, le=365), limit: int = Query(50, ge=1, le=200)):
     """Domains THIS device has queried for the first time in the last `days`

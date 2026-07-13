@@ -226,6 +226,14 @@ export interface DeviceNewDomains {
   domains: DeviceNewDomain[];
 }
 
+// Unified per-device investigation timeline (#5) -- merges NameChangeEntry
+// and AlertEvent into one chronological feed via a "type" discriminator.
+// v1 scope note: anomaly detections are NOT included -- see the endpoint's
+// own docstring (db.detect_anomalies() has no persisted history to draw on).
+export type TimelineEntry =
+  | (Omit<NameChangeEntry, "type"> & { type: "name_change"; at: number })
+  | (Omit<AlertEvent, "type"> & { type: "alert_event"; at: number });
+
 export type RuleType =
   | "volume_threshold"
   | "new_device"
@@ -625,6 +633,8 @@ export const api = {
     getJson<NameChangeEntry[]>(`/api/device-names/${encodeURIComponent(ip)}/history`),
   deviceNewDomains: (ip: string) =>
     getJson<DeviceNewDomains>(`/api/device-names/${encodeURIComponent(ip)}/new-domains`),
+  deviceTimeline: (ip: string) =>
+    getJson<TimelineEntry[]>(`/api/device-names/${encodeURIComponent(ip)}/timeline`),
 
   listVendors: () => getJson<Vendor[]>("/api/vendors"),
 

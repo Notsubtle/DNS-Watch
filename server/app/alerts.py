@@ -1051,6 +1051,34 @@ def list_events(limit: int = 50) -> list[dict]:
     ]
 
 
+def events_for_client(ip: str, limit: int = 50) -> list[dict]:
+    """Most-recent-first fired events for ONE client (#5 in the feature
+    backlog) -- backs the unified per-device investigation timeline, which
+    merges this with name_history.history_for() into one chronological feed.
+    Same row shape as list_events(), just scoped by client_ip."""
+    init_store()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM alert_events WHERE client_ip = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+            (ip, limit),
+        ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "rule_id": r["rule_id"],
+            "rule_name": r["rule_name"],
+            "type": r["type"],
+            "severity": r["severity"],
+            "message": r["message"],
+            "created_at": r["created_at"],
+            "dedup_key": r["dedup_key"],
+            "client_ip": r["client_ip"],
+            "domain": r["domain"],
+        }
+        for r in rows
+    ]
+
+
 def snooze_event(event_id: int, until: int) -> dict | None:
     """Silence future recurrences of this specific fired event's dedup_key
     until `until` (unix ts), without touching the rule itself or any other

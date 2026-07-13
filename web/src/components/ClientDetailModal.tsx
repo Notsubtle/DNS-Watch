@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, ClientDetail, DeviceNewDomain } from "../api";
+import { api, ClientDetail, DeviceNewDomain, TimelineEntry } from "../api";
 import SummaryCards from "./SummaryCards";
 import TimeSeriesChart from "./TimeSeriesChart";
 import TopList from "./TopList";
@@ -32,6 +32,7 @@ export default function ClientDetailModal({ ip, range, onClose }: Props) {
   // a failure/not-ready here shouldn't block the rest of the modal from
   // rendering, so it's tracked independently and just renders nothing if unset.
   const [newDomains, setNewDomains] = useState<DeviceNewDomain[] | null>(null);
+  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -53,6 +54,18 @@ export default function ClientDetailModal({ ip, range, onClose }: Props) {
       .deviceNewDomains(ip)
       .then((d) => !cancelled && setNewDomains(d.ready ? d.domains : []))
       .catch(() => !cancelled && setNewDomains([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [ip]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setTimeline([]);
+    api
+      .deviceTimeline(ip)
+      .then((t) => !cancelled && setTimeline(t))
+      .catch(() => !cancelled && setTimeline([]));
     return () => {
       cancelled = true;
     };
@@ -121,6 +134,33 @@ export default function ClientDetailModal({ ip, range, onClose }: Props) {
                     <li key={d.domain}>
                       <span className="client-new-domain-name">{d.domain}</span>
                       <span className="client-new-domain-time">{fmtDate(d.first_seen)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {timeline.length > 0 && (
+              <div className="client-timeline">
+                <h3 className="modal-section">Timeline</h3>
+                <p className="modal-sub">
+                  Name changes and fired alerts for this device, most recent first. Anomaly
+                  detections (silent/spike/NXDOMAIN/latency) aren't included — they're computed
+                  live and have no persisted history.
+                </p>
+                <ul>
+                  {timeline.map((t, i) => (
+                    <li key={i} className={`timeline-entry timeline-${t.type}`}>
+                      <span className="client-new-domain-time">{fmtDate(t.at)}</span>
+                      {t.type === "name_change" ? (
+                        <span>
+                          Name changed ({t.source}): {t.old_name ?? "(none)"} → {t.new_name ?? "(none)"}
+                        </span>
+                      ) : (
+                        <span>
+                          [{t.severity}] {t.message}
+                        </span>
+                      )}
                     </li>
                   ))}
                 </ul>
