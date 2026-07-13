@@ -27,6 +27,8 @@ import os
 import sqlite3
 import time
 
+from app import name_history
+
 STORE_PATH = os.environ.get("DNSWATCH_DB_PATH", "/data/dnswatch.db")
 
 MAX_NAME_LENGTH = 100
@@ -110,6 +112,7 @@ def set_name(ip: str, name: str) -> None:
     now = int(time.time())
     init_store()
     with _connect() as conn:
+        prev = conn.execute("SELECT name FROM manual_client_names WHERE ip = ?", (ip,)).fetchone()
         conn.execute(
             "INSERT INTO manual_client_names (ip, name, created_at, updated_at) "
             "VALUES (?, ?, ?, ?) "
@@ -117,12 +120,17 @@ def set_name(ip: str, name: str) -> None:
             (ip, name, now, now),
         )
         conn.commit()
+    name_history.record_change(ip, "manual", prev["name"] if prev else None, name)
 
 
 def delete_name(ip: str) -> bool:
     """True if a row was actually deleted, so main.py can 404 on an unknown ip."""
     init_store()
     with _connect() as conn:
+        prev = conn.execute("SELECT name FROM manual_client_names WHERE ip = ?", (ip,)).fetchone()
         cur = conn.execute("DELETE FROM manual_client_names WHERE ip = ?", (ip,))
         conn.commit()
-        return cur.rowcount > 0
+        deleted = cur.rowcount > 0
+    if deleted:
+        name_history.record_change(ip, "manual", prev["name"] if prev else None, None)
+    return deleted

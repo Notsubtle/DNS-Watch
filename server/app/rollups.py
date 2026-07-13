@@ -168,6 +168,23 @@ def init_rollup_store() -> None:
                 first_seen INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_seen_domains_first_seen ON seen_domains (first_seen);
+            -- Per-domain, per-day allowed/blocked split -- backs both the
+            -- blocklist-effectiveness "newly blocked/unblocked domains" view
+            -- and the period-over-period "top domain shifts" comparison.
+            -- domain_totals only has a cumulative all-time count with no
+            -- status or day dimension, so neither of those reads is possible
+            -- from it alone. Same domain-cardinality-growth caveat as
+            -- seen_domains above (unbounded on a busy/long-lived network) --
+            -- no retention policy in v1, flagged as a known follow-up rather
+            -- than blocking this feature on it.
+            CREATE TABLE IF NOT EXISTS domain_status_daily (
+                domain TEXT NOT NULL,
+                day TEXT NOT NULL,
+                allowed_count INTEGER NOT NULL DEFAULT 0,
+                blocked_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (domain, day)
+            );
+            CREATE INDEX IF NOT EXISTS idx_domain_status_daily_day ON domain_status_daily (day);
             CREATE TABLE IF NOT EXISTS rollup_cursor (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 last_query_id INTEGER,
@@ -225,6 +242,7 @@ _ROLLUP_TABLES = (
     "client_domain_rollup",
     "client_activity_rollup",
     "seen_domains",
+    "domain_status_daily",
 )
 
 
@@ -359,6 +377,8 @@ class _Deltas:
         # there first across the whole drain, since batches themselves are
         # also strictly ascending.
         self.domain_first_seen: dict[str, int] = {}
+        # (domain, day) -> [allowed, blocked] -- see domain_status_daily above.
+        self.domain_daily: dict[tuple[str, str], list[int]] = {}
 
     def add(self, row: dict) -> None:
         ts = row["timestamp"]
@@ -388,6 +408,17 @@ class _Deltas:
         if domain is not None:
             self.domain[domain] = self.domain.get(domain, 0) + 1
             self.domain_first_seen.setdefault(domain, int(ts))
+            # Unknown status (neither BLOCKED_STATUSES nor ALLOWED_STATUSES)
+            # is deliberately NOT tracked here -- this table only needs to
+            # answer "blocked or not", and the unknown tail is a small,
+            # fixed fraction (see daily_totals' unknown_count comment above)
+            # that would only add noise to a blocked/allowed comparison.
+            if status in db.BLOCKED_STATUSES or status in db.ALLOWED_STATUSES:
+                dd = self.domain_daily.setdefault((domain, day), [0, 0])
+                if status in db.BLOCKED_STATUSES:
+                    dd[1] += 1
+                else:
+                    dd[0] += 1
 
         if ip is not None:
             ic = int(ts)
@@ -464,6 +495,15 @@ def _apply(conn: sqlite3.Connection, deltas: _Deltas) -> None:
         conn.executemany(
             "INSERT OR IGNORE INTO seen_domains (domain, first_seen) VALUES (?, ?)",
             list(deltas.domain_first_seen.items()),
+        )
+    if deltas.domain_daily:
+        conn.executemany(
+            "INSERT INTO domain_status_daily (domain, day, allowed_count, blocked_count) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(domain, day) DO UPDATE SET "
+            "allowed_count = allowed_count + excluded.allowed_count, "
+            "blocked_count = blocked_count + excluded.blocked_count",
+            [(dom, day, a, b) for (dom, day), (a, b) in deltas.domain_daily.items()],
         )
 
 
@@ -973,3 +1013,171 @@ def new_domains(after_ts: int) -> list[dict] | None:
             [after_ts],
         ).fetchall()
     return [{"domain": r["domain"], "first_seen": r["first_seen"]} for r in rows]
+
+
+# --------------------------------------------------------------------------
+# Blocklist-effectiveness trend: retrospective complement to the Blocklist
+# Impact Simulator's forward-looking "what WOULD this regex block" -- this
+# looks backward at what actually started/stopped being blocked.
+# --------------------------------------------------------------------------
+
+DOMAIN_STATUS_RECENT_DAYS = 3  # "just changed" window
+DOMAIN_STATUS_PRIOR_DAYS = 14  # comparison window immediately before it
+DOMAIN_STATUS_MIN_COUNT = 3    # a domain needs real traffic in BOTH the window
+                               # it changed in and the one it's compared against,
+                               # so a single one-off query can't look like a
+                               # status change.
+
+
+def read_domain_status_changes(limit: int = 25) -> dict | None:
+    """Domains that appear to have newly started or stopped being blocked:
+    `newly_blocked` (blocked now, never blocked in the prior window, but WAS
+    queried and allowed then -- so this is a real pre-existing domain whose
+    status changed, not just a brand-new domain that happens to be blocked
+    from day one, which the existing first_seen_domain alert already covers)
+    and `newly_unblocked` (the mirror case). Returns None when the rollup
+    isn't ready yet, same contract as new_domains()."""
+    init_rollup_store()
+    with _connect() as conn:
+        if not _rollups_ready(conn):
+            return None
+        today = _day_str(time.time())
+        recent_start = _day_str(_day_start_ts(today) - (DOMAIN_STATUS_RECENT_DAYS - 1) * 86400)
+        prior_start = _day_str(_day_start_ts(recent_start) - DOMAIN_STATUS_PRIOR_DAYS * 86400)
+        rows = conn.execute(
+            "SELECT domain, day, allowed_count, blocked_count FROM domain_status_daily WHERE day >= ?",
+            [prior_start],
+        ).fetchall()
+
+    agg: dict[str, dict[str, int]] = {}
+    for r in rows:
+        d = agg.setdefault(r["domain"], {"prior_allowed": 0, "prior_blocked": 0, "recent_allowed": 0, "recent_blocked": 0})
+        bucket = "recent" if r["day"] >= recent_start else "prior"
+        d[f"{bucket}_allowed"] += r["allowed_count"]
+        d[f"{bucket}_blocked"] += r["blocked_count"]
+
+    newly_blocked = []
+    newly_unblocked = []
+    for domain, d in agg.items():
+        if (d["recent_blocked"] >= DOMAIN_STATUS_MIN_COUNT and d["prior_blocked"] == 0
+                and d["prior_allowed"] >= DOMAIN_STATUS_MIN_COUNT):
+            newly_blocked.append({"domain": domain, "blocked_count": d["recent_blocked"]})
+        elif (d["prior_blocked"] >= DOMAIN_STATUS_MIN_COUNT and d["recent_blocked"] == 0
+                and d["recent_allowed"] >= DOMAIN_STATUS_MIN_COUNT):
+            newly_unblocked.append({"domain": domain, "allowed_count": d["recent_allowed"]})
+
+    newly_blocked.sort(key=lambda x: -x["blocked_count"])
+    newly_unblocked.sort(key=lambda x: -x["allowed_count"])
+    return {"newly_blocked": newly_blocked[:limit], "newly_unblocked": newly_unblocked[:limit]}
+
+
+# --------------------------------------------------------------------------
+# Period-over-period "what changed" comparison -- a visual complement to the
+# digest alert's text summary: current N-day period vs. the N days
+# immediately before it, across block rate, top domain volume shifts, top
+# client volume deltas, and newly-appeared devices. Built entirely from
+# rollup tables already maintained for other features (daily_totals,
+# domain_status_daily, client_activity_rollup, client_totals) -- no new
+# collection, just a different read over existing state.
+# --------------------------------------------------------------------------
+
+PERIOD_COMPARISON_DEFAULT_DAYS = 7
+PERIOD_COMPARISON_LIMIT = 10
+
+
+def read_period_comparison(period_days: int = PERIOD_COMPARISON_DEFAULT_DAYS,
+                            limit: int = PERIOD_COMPARISON_LIMIT) -> dict | None:
+    """Returns None when the rollup isn't ready yet (same contract as
+    new_domains()/read_domain_status_changes()). `prior_period_available` in
+    the result is False when the rollup's own history doesn't go back far
+    enough to cover a full prior period -- callers should treat the prior-
+    period numbers as meaningless (not "zero change") in that case, since a
+    genuinely empty prior period and a not-yet-existing one look identical
+    in the raw sums otherwise."""
+    init_rollup_store()
+    with _connect() as conn:
+        if not _rollups_ready(conn):
+            return None
+        now = time.time()
+        today = _day_str(now)
+        current_start = _day_str(_day_start_ts(today) - (period_days - 1) * 86400)
+        prior_start = _day_str(_day_start_ts(current_start) - period_days * 86400)
+
+        first_day = conn.execute("SELECT MIN(day) AS d FROM daily_totals").fetchone()["d"]
+        prior_period_available = first_day is not None and first_day <= prior_start
+
+        daily_rows = conn.execute(
+            "SELECT day, allowed_count, blocked_count, unknown_count FROM daily_totals WHERE day >= ?",
+            [prior_start],
+        ).fetchall()
+        domain_rows = conn.execute(
+            "SELECT domain, day, allowed_count, blocked_count FROM domain_status_daily WHERE day >= ?",
+            [prior_start],
+        ).fetchall()
+        client_rows = conn.execute(
+            "SELECT ip, day, count FROM client_activity_rollup WHERE day >= ?",
+            [prior_start],
+        ).fetchall()
+        client_names = {r["ip"]: r["name"] for r in conn.execute("SELECT ip, name FROM client_totals")}
+        new_device_rows = conn.execute(
+            "SELECT ip, name, first_seen FROM client_totals WHERE first_seen >= ?",
+            [_day_start_ts(current_start)],
+        ).fetchall()
+
+    def is_current(day: str) -> bool:
+        return day >= current_start
+
+    cur_totals = {"allowed": 0, "blocked": 0, "unknown": 0}
+    prior_totals = {"allowed": 0, "blocked": 0, "unknown": 0}
+    for r in daily_rows:
+        bucket = cur_totals if is_current(r["day"]) else prior_totals
+        bucket["allowed"] += r["allowed_count"]
+        bucket["blocked"] += r["blocked_count"]
+        bucket["unknown"] += r["unknown_count"]
+
+    def block_rate_pct(b: dict[str, int]) -> float:
+        total = b["allowed"] + b["blocked"] + b["unknown"]
+        return round(b["blocked"] / total * 100, 2) if total else 0.0
+
+    domains: dict[str, dict[str, int]] = {}
+    for r in domain_rows:
+        d = domains.setdefault(r["domain"], {"current": 0, "prior": 0})
+        key = "current" if is_current(r["day"]) else "prior"
+        d[key] += r["allowed_count"] + r["blocked_count"]
+    domain_shifts = [
+        {"domain": dom, "current": v["current"], "prior": v["prior"], "delta": v["current"] - v["prior"]}
+        for dom, v in domains.items()
+    ]
+    domain_shifts.sort(key=lambda x: -abs(x["delta"]))
+
+    clients: dict[str, dict[str, int]] = {}
+    for r in client_rows:
+        c = clients.setdefault(r["ip"], {"current": 0, "prior": 0})
+        c["current" if is_current(r["day"]) else "prior"] += r["count"]
+    resolved = resolve.get_names()
+    manual = names.get_names()
+    client_deltas = [
+        {
+            "ip": ip, "name": db._display_name(client_names.get(ip), ip, resolved, manual),
+            "current": v["current"], "prior": v["prior"], "delta": v["current"] - v["prior"],
+        }
+        for ip, v in clients.items()
+    ]
+    client_deltas.sort(key=lambda x: -abs(x["delta"]))
+
+    new_devices = [
+        {"ip": r["ip"], "name": db._display_name(r["name"], r["ip"], resolved, manual), "first_seen": r["first_seen"]}
+        for r in new_device_rows
+    ]
+    new_devices.sort(key=lambda x: -x["first_seen"])
+
+    return {
+        "current_since": _day_start_ts(current_start), "current_until": int(now),
+        "prior_since": _day_start_ts(prior_start), "prior_until": _day_start_ts(current_start),
+        "prior_period_available": prior_period_available,
+        "block_rate_current": block_rate_pct(cur_totals),
+        "block_rate_prior": block_rate_pct(prior_totals),
+        "top_domain_shifts": domain_shifts[:limit],
+        "top_client_deltas": client_deltas[:limit],
+        "new_devices": new_devices,
+    }

@@ -9,7 +9,14 @@ function pctAboveBaseline(a: Anomaly): number {
 
 function describe(a: Anomaly): string {
   if (a.kind === "silent") return `${a.name} (No activity)`;
+  if (a.kind === "nxdomain") return `${a.name} (${a.current_value}% failed lookups)`;
   return `${a.name} (+${pctAboveBaseline(a)}% Spike)`;
+}
+
+// "nxdomain" reports a rate (%), not a queries/hr count -- see api.ts's Anomaly.kind comment.
+function statLine(a: Anomaly): string {
+  if (a.kind === "nxdomain") return `Baseline: ${a.baseline_avg}% · Current: ${a.current_value}%`;
+  return `Baseline: ${a.baseline_avg}/hr (±${a.baseline_stddev}) · Current: ${a.current_value}/hr`;
 }
 
 interface Props {
@@ -43,10 +50,7 @@ export default function AnomaliesPanel({ anomalies, onSelect, onSelectIp }: Prop
               onClick={() => onSelect(a)}
               role="button"
               tabIndex={0}
-              title={
-                `Baseline: ${a.baseline_avg}/hr (±${a.baseline_stddev}) · Current: ${a.current_value}/hr` +
-                (a.presence_note ? ` · ${a.presence_note}` : "")
-              }
+              title={statLine(a) + (a.presence_note ? ` · ${a.presence_note}` : "")}
             >
               <span className={`alert-dot ${a.kind === "silent" ? "warning" : "critical"}`} />
               <span className="alert-msg">{describe(a)}</span>
