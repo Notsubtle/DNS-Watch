@@ -301,6 +301,15 @@ export interface ClientDetail {
   mac_known: boolean;
   vendor: string | null;
   vendor_unknown_reason: "randomized" | "unlisted" | null;
+  // Domain lexical/entropy scoring (#3) -- soft "% of this device's distinct
+  // domains that look random/algorithmically generated" metric, computed
+  // over distinct domains (not query volume). See db.client_entropy_summary.
+  entropy: {
+    total_domains: number;
+    high_entropy_count: number;
+    pct_high_entropy: number;
+    sample_domains: string[];
+  };
 }
 
 export interface Anomaly {

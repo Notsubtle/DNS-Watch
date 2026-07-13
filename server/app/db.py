@@ -944,6 +944,83 @@ def _top_domains_id(client: str | list[str] | None, since: int | None, limit: in
     return out[:limit]
 
 
+# --------------------------------------------------------------------------
+# Domain lexical/entropy scoring (#3 in the feature backlog): a SOFT,
+# per-domain metric complementing the NXDOMAIN-rate anomaly detector -- a
+# live C2/DGA domain that actually resolves won't trip NXDOMAIN detection at
+# all (it only fires on failed lookups), but a high-entropy/algorithmically-
+# generated label scores high here regardless of whether it resolves.
+#
+# Deliberately presented as a soft score/badge everywhere it's surfaced,
+# NEVER a hard alert -- legitimately random-looking hostnames (CDN edge
+# nodes, content hashes, hashed asset paths) are common and would make a
+# hard threshold noisy on an ordinary home network.
+# --------------------------------------------------------------------------
+
+# Below this many characters, entropy is too noisy to mean anything (e.g. a
+# 4-character label has at most 2 bits/char of headroom just from being
+# short) -- short domains are never flagged regardless of their score.
+DOMAIN_ENTROPY_MIN_LENGTH = 8
+# Shannon entropy, bits/char, over the label(s) sitting in front of the
+# registered parent domain. English words/hostnames typically land under
+# ~3.0; random/base32-ish DGA output typically lands well above it. Chosen
+# as a conventional DGA-detection cutoff, not tuned against this app's own
+# data -- see the module note above on why this is a soft score, not a hard
+# alert threshold.
+DOMAIN_ENTROPY_THRESHOLD = 3.3
+
+
+def _shannon_entropy(s: str) -> float:
+    """Bits per character, over `s`'s own character frequency distribution.
+    0.0 for an empty or single-repeated-character string (no information)."""
+    if not s:
+        return 0.0
+    counts: dict[str, int] = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+def domain_entropy(domain: str | None) -> float:
+    """Entropy of the part of `domain` that sits IN FRONT OF its registered
+    parent (see app/psl.py) -- e.g. for "a1b2c3.tunnel.example.com" this
+    scores "a1b2c3.tunnel", not the whole hostname, so a domain's popularity
+    or a long-but-ordinary registered name (github.io) doesn't dilute the
+    score of whatever a client actually chose to put in front of it. Falls
+    back to the whole hostname when there's nothing in front of the parent
+    (domain.registered_domain(domain) == domain itself)."""
+    if not domain:
+        return 0.0
+    parent = psl.registered_domain(domain)
+    prefix = domain[: -len(parent) - 1] if len(domain) > len(parent) else domain
+    return _shannon_entropy(prefix.replace(".", ""))
+
+
+def is_high_entropy_domain(domain: str | None) -> bool:
+    if not domain or len(domain) < DOMAIN_ENTROPY_MIN_LENGTH:
+        return False
+    return domain_entropy(domain) >= DOMAIN_ENTROPY_THRESHOLD
+
+
+def client_entropy_summary(ip: str, since: int | None = None, limit_domains: int = 500) -> dict:
+    """Per-client "% of this device's distinct domains that look
+    high-entropy" (#3) -- computed over DISTINCT domains (via top_domains),
+    not raw query volume, so a client hammering one high-entropy domain
+    doesn't dominate the percentage the way a query-count-weighted average
+    would."""
+    domains = top_domains(ip, since, limit=limit_domains)
+    named = [d["domain"] for d in domains if d["domain"] is not None]
+    high = [d for d in named if is_high_entropy_domain(d)]
+    total = len(named)
+    return {
+        "total_domains": total,
+        "high_entropy_count": len(high),
+        "pct_high_entropy": round(100 * len(high) / total, 1) if total else 0.0,
+        "sample_domains": high[:10],
+    }
+
+
 def top_blocked_per_client(
     client: str | list[str] | None, since: int | None, limit: int = 15
 ) -> list[dict]:
@@ -1527,6 +1604,7 @@ def client_detail(ip: str, since: int | None, until: int | None) -> dict:
         "top_domains": top_domains(ip, since, limit=10),
         "query_types": query_types(ip, since, until),
         "timeseries": timeseries(ip, since, until, buckets=40),
+        "entropy": client_entropy_summary(ip, since),
         **vendor_fields,
     }
 

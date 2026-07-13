@@ -135,6 +135,17 @@ body {
   white-space: nowrap;
 }
 
+.entropy-badge {
+  margin-left: 4px;
+  cursor: help;
+}
+
+.client-entropy-summary {
+  color: var(--ink-muted);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
 @keyframes stream-row-flash {
   from {
     background: rgba(77, 158, 255, 0.25);

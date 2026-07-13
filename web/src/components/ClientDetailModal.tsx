@@ -102,6 +102,17 @@ export default function ClientDetailModal({ ip, range, onClose }: Props) {
               <QueryTypeBreakdown entries={data.query_types} />
             </div>
 
+            {data.entropy.total_domains > 0 && (
+              <div className="client-entropy-summary">
+                {data.entropy.pct_high_entropy}% of {data.entropy.total_domains} distinct domains
+                look high-entropy (random/algorithmically generated) — a soft signal, not a
+                confirmed finding
+                {data.entropy.sample_domains.length > 0 && (
+                  <>: {data.entropy.sample_domains.slice(0, 5).join(", ")}</>
+                )}
+              </div>
+            )}
+
             {newDomains && newDomains.length > 0 && (
               <div className="client-new-domains">
                 <h3 className="modal-section">New for this device (last 30d)</h3>

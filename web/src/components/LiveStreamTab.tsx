@@ -9,6 +9,7 @@ import {
   matchHighlightColor,
 } from "../highlightRules";
 import HighlightRulesModal from "./HighlightRulesModal";
+import { isHighEntropyDomain } from "../entropy";
 
 const POLL_MS = 1500;
 const THROTTLED_POLL_MS = 3000;
@@ -48,6 +49,14 @@ function StreamRow({ index, style, rows, newIds, compiledRules }: RowComponentPr
       </span>
       <span className="stream-domain" title={r.domain}>
         {r.domain}
+        {isHighEntropyDomain(r.domain) && (
+          <span
+            className="entropy-badge"
+            title="High lexical entropy -- looks random/algorithmically generated (soft signal, not a confirmed finding)"
+          >
+            ⚡
+          </span>
+        )}
       </span>
       <span className={`status-pill ${r.status} mini`}>{r.status}</span>
     </div>
