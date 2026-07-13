@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import io
 
+from app.main import _csv_safe
+
 
 def test_queries_envelope_and_total(client):
     r = client.get("/api/queries?range=all&limit=10").json()
@@ -91,3 +93,16 @@ def test_csv_export(client):
     blocked = list(csv.reader(io.StringIO(
         client.get("/api/queries.csv?range=all&status=blocked&limit=1000").text)))
     assert {row[6] for row in blocked[1:]} == {"blocked"}
+
+
+def test_csv_safe_neutralizes_formula_leads():
+    # A manual device name or queried domain starting with one of these is
+    # interpreted as a formula by Excel/Sheets when the export is opened —
+    # the leading quote forces it back to literal text.
+    for payload in ("=cmd|'/c calc'!A1", "+1+1", "-2+3", "@SUM(A1:A9)"):
+        safe = _csv_safe(payload)
+        assert safe == "'" + payload
+        assert safe[0] == "'"
+
+    assert _csv_safe("desktop.lan") == "desktop.lan"
+    assert _csv_safe("") == ""

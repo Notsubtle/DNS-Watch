@@ -80,12 +80,22 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="DNS Watch", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # LAN-only tool behind your own firewall; see README hardening notes
-    allow_methods=["GET", "POST", "PATCH", "DELETE"],
-    allow_headers=["*"],
-)
+# No cross-origin browser access by default: the SPA is always served
+# same-origin (prod) or proxied same-origin by Vite's dev server (see
+# web/vite.config.ts's /api proxy), so nothing in this codebase needs CORS
+# to function. A wildcard here would let ANY webpage the user's browser
+# visits read their DNS history via fetch() while on the same LAN — CORS
+# governs what a *browser* will hand back to JS, so it doesn't gate curl/
+# server-to-server calls either way. Set DNSWATCH_CORS_ORIGINS (comma-
+# separated) only if you have a real cross-origin caller.
+_CORS_ORIGINS = [o.strip() for o in os.environ.get("DNSWATCH_CORS_ORIGINS", "").split(",") if o.strip()]
+if _CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_CORS_ORIGINS,
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
+        allow_headers=["*"],
+    )
 
 # Optional HTTP Basic auth. Enabled only when DNSWATCH_AUTH_PASSWORD is set, so
 # the default (unset) stays open for LAN use and local dev. When set, every
@@ -282,6 +292,22 @@ def api_simulate_blocklist(body: SimulateRequest):
         raise HTTPException(status_code=503, detail=str(e))
 
 
+_FORMULA_LEAD_CHARS = ("=", "+", "-", "@")
+
+
+def _csv_safe(value: str) -> str:
+    """Neutralize spreadsheet formula injection: Excel/Sheets treat a cell
+    starting with =, +, -, or @ as a formula when the CSV is opened, and
+    client_name/domain here can come from a manual device name or a domain a
+    LAN client queried — both effectively attacker-controllable inputs from
+    this export's point of view. Prefixing with a single quote forces
+    spreadsheet apps to treat it as literal text without changing the value
+    for any other consumer (plain CSV readers just see an extra character)."""
+    if value and value[0] in _FORMULA_LEAD_CHARS:
+        return "'" + value
+    return value
+
+
 @app.get("/api/queries.csv")
 def api_queries_csv(
     client: str | None = None,
@@ -310,7 +336,7 @@ def api_queries_csv(
             writer.writerow([
                 r["timestamp"],
                 time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(r["timestamp"])),
-                r["client_ip"], r["client_name"], r["domain"],
+                r["client_ip"], _csv_safe(r["client_name"]), _csv_safe(r["domain"]),
                 r["query_type"], r["status"], r["raw_status"],
             ])
         yield buf.getvalue()
