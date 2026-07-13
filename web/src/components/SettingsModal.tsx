@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, BackupRestoreSummary, StorageStats, WebhookFormat } from "../api";
+import { api, AlertSuppression, BackupRestoreSummary, StorageStats, WebhookFormat } from "../api";
 
 interface Props {
   onClose: () => void;
@@ -54,6 +54,34 @@ export default function SettingsModal({ onClose }: Props) {
   const [pruneDays, setPruneDays] = useState("90");
   const [pruning, setPruning] = useState(false);
   const [pruneResult, setPruneResult] = useState<string | null>(null);
+
+  // Permanent alert suppression review list (#6) -- without this, a
+  // suppression added once could silently hide a real future problem forever.
+  const [suppressions, setSuppressions] = useState<AlertSuppression[]>([]);
+  const [suppressionsError, setSuppressionsError] = useState<string | null>(null);
+
+  function loadSuppressions() {
+    api
+      .listSuppressions()
+      .then((s) => {
+        setSuppressions(s);
+        setSuppressionsError(null);
+      })
+      .catch((e) => setSuppressionsError((e as Error).message));
+  }
+
+  async function removeSuppression(id: number) {
+    try {
+      await api.deleteSuppression(id);
+      loadSuppressions();
+    } catch (e) {
+      setSuppressionsError((e as Error).message);
+    }
+  }
+
+  useEffect(() => {
+    loadSuppressions();
+  }, []);
 
   useEffect(() => {
     api
@@ -317,6 +345,35 @@ export default function SettingsModal({ onClose }: Props) {
                 {restoreSummary.device_names} device name(s)
                 {restoreSummary.settings_restored ? ", and webhook settings" : ""}.
               </div>
+            )}
+
+            <h3 className="modal-section">Suppressed alerts</h3>
+            <p className="settings-hint">
+              Rules permanently suppressed for a specific device and/or domain (a known false
+              positive) — click "Suppress" on a fired alert to add one. Remove an entry here to
+              let that rule fire for that device/domain again.
+            </p>
+            {suppressionsError && <div className="error-banner">{suppressionsError}</div>}
+            {suppressions.length === 0 ? (
+              <p className="settings-hint">No suppressions.</p>
+            ) : (
+              <ul className="rule-list">
+                {suppressions.map((s) => (
+                  <li key={s.id}>
+                    <div className="rule-info">
+                      <span className="rule-name">{s.rule_name ?? `Rule #${s.rule_id}`}</span>
+                      <span className="rule-desc">
+                        {s.client_ip && `device ${s.client_ip}`}
+                        {s.client_ip && s.domain && " · "}
+                        {s.domain && `domain ${s.domain}`}
+                      </span>
+                    </div>
+                    <button className="btn-danger" onClick={() => removeSuppression(s.id)}>
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
             )}
 
             <h3 className="modal-section">Storage</h3>

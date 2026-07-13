@@ -114,6 +114,26 @@ def init_store() -> None:
                 dedup_key TEXT PRIMARY KEY,
                 snoozed_until INTEGER NOT NULL
             );
+            -- Permanent suppression (#6 in the feature backlog) -- distinct
+            -- from alert_snoozes above, which is time-boxed (1h/24h/7d) and
+            -- keyed on one exact dedup_key (this SPECIFIC recurrence). This
+            -- is "this rule is a known false positive for this device/domain,
+            -- forever", keyed on the broader (rule_id, client_ip, domain)
+            -- shape so it matches EVERY future dedup_key that rule/client/
+            -- domain combination would ever produce, not just today's exact
+            -- key. client_ip/domain are each nullable independently:
+            -- (rule, ip, NULL) suppresses that rule for that device across
+            -- every domain; (rule, NULL, domain) suppresses it for that
+            -- domain across every device; (rule, ip, domain) suppresses only
+            -- that exact pairing.
+            CREATE TABLE IF NOT EXISTS alert_suppressions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_id INTEGER NOT NULL,
+                client_ip TEXT,
+                domain TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_suppressions_rule ON alert_suppressions (rule_id);
             """
         )
         # client_ip/domain (#43) are added via ALTER rather than baked into
@@ -486,6 +506,10 @@ def delete_rule(rule_id: int) -> bool:
     init_store()
     with _connect() as conn:
         cur = conn.execute("DELETE FROM alert_rules WHERE id = ?", (rule_id,))
+        # A suppression for a deleted rule is dead weight, not a meaningful
+        # "known false positive" anymore -- clean it up in the SAME commit so
+        # the review list never shows an orphaned entry pointing at nothing.
+        conn.execute("DELETE FROM alert_suppressions WHERE rule_id = ?", (rule_id,))
         conn.commit()
     return cur.rowcount > 0
 
@@ -977,6 +1001,8 @@ def evaluate() -> list[dict]:
     fired: list[dict] = []
     with _eval_lock, _connect() as conn:
         for ev in pending:
+            if _is_suppressed(conn, ev["rule_id"], ev.get("client_ip"), ev.get("domain")):
+                continue
             snoozed_until = _snoozed_until(conn, ev["dedup_key"])
             if snoozed_until and snoozed_until > now:
                 continue
@@ -1122,3 +1148,66 @@ def _snoozed_until(conn: sqlite3.Connection, dedup_key: str) -> int | None:
         "SELECT snoozed_until FROM alert_snoozes WHERE dedup_key = ?", (dedup_key,)
     ).fetchone()
     return row["snoozed_until"] if row else None
+
+
+# --------------------------------------------------------------------------
+# Permanent suppression (#6) -- see alert_suppressions' own schema comment
+# for how this differs from alert_snoozes above.
+# --------------------------------------------------------------------------
+
+def add_suppression(rule_id: int, client_ip: str | None, domain: str | None) -> dict:
+    if client_ip is None and domain is None:
+        raise ValueError("suppression needs at least a client_ip or a domain -- "
+                          "suppressing a rule entirely should just disable the rule")
+    init_store()
+    with _connect() as conn:
+        row = conn.execute("SELECT id FROM alert_rules WHERE id = ?", (rule_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"no such rule: {rule_id}")
+        cur = conn.execute(
+            "INSERT INTO alert_suppressions (rule_id, client_ip, domain, created_at) VALUES (?,?,?,?)",
+            (rule_id, client_ip, domain, int(time.time())),
+        )
+        conn.commit()
+        sid = cur.lastrowid
+    return {"id": sid, "rule_id": rule_id, "client_ip": client_ip, "domain": domain}
+
+
+def list_suppressions() -> list[dict]:
+    """The review list a permanent suppression's own risk note calls for --
+    without this, a suppression added once could silently hide a real future
+    problem forever with no way to notice or revisit it."""
+    init_store()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT s.id, s.rule_id, r.name AS rule_name, s.client_ip, s.domain, s.created_at "
+            "FROM alert_suppressions s LEFT JOIN alert_rules r ON r.id = s.rule_id "
+            "ORDER BY s.created_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def remove_suppression(suppression_id: int) -> bool:
+    init_store()
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM alert_suppressions WHERE id = ?", (suppression_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def _is_suppressed(conn: sqlite3.Connection, rule_id: int, client_ip: str | None, domain: str | None) -> bool:
+    """True if ANY suppression row for this rule matches -- a row's own
+    NULL client_ip/domain is a wildcard for that dimension (see the schema
+    comment), so this checks all three shapes explicitly rather than relying
+    on SQL's NULL = NULL semantics (which would never match)."""
+    rows = conn.execute(
+        "SELECT client_ip, domain FROM alert_suppressions WHERE rule_id = ?", (rule_id,)
+    ).fetchall()
+    for r in rows:
+        sip, sdomain = r["client_ip"], r["domain"]
+        if sip is not None and sip != client_ip:
+            continue
+        if sdomain is not None and sdomain != domain:
+            continue
+        return True
+    return False

@@ -763,6 +763,39 @@ def api_delete_rule(rule_id: int):
     return {"deleted": rule_id}
 
 
+class SuppressionCreate(BaseModel):
+    rule_id: int
+    client_ip: str | None = None
+    domain: str | None = None
+
+
+@app.get("/api/alert-suppressions")
+def api_list_suppressions():
+    """The review list a permanent suppression's own risk note calls for
+    (#6) -- without this, a forgotten suppression could silently hide a real
+    future problem."""
+    return alerts.list_suppressions()
+
+
+@app.post("/api/alert-suppressions")
+def api_create_suppression(body: SuppressionCreate):
+    """Permanently suppress a rule for a specific device and/or domain (#6)
+    -- distinct from the time-boxed snooze above. See alerts.add_suppression
+    and the alert_suppressions schema comment for exactly what NULL means in
+    each field."""
+    try:
+        return alerts.add_suppression(body.rule_id, body.client_ip, body.domain)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/alert-suppressions/{suppression_id}")
+def api_delete_suppression(suppression_id: int):
+    if not alerts.remove_suppression(suppression_id):
+        raise HTTPException(status_code=404, detail="suppression not found")
+    return {"deleted": suppression_id}
+
+
 @app.get("/api/device-names")
 def api_list_device_names():
     """Every ip DNS Watch knows about, with each name source broken out

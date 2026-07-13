@@ -284,6 +284,18 @@ export interface AlertEvent {
   domain: string | null;
 }
 
+// Permanent alert suppression (#6) -- distinct from the time-boxed snooze
+// above (SnoozeRequest via snoozeEvent). See alerts.add_suppression's
+// module note for what a null client_ip/domain means in each field.
+export interface AlertSuppression {
+  id: number;
+  rule_id: number;
+  rule_name: string | null;
+  client_ip: string | null;
+  domain: string | null;
+  created_at: number;
+}
+
 export interface AlertsResponse {
   evaluated_at: number;
   new: number;
@@ -629,6 +641,12 @@ export const api = {
     sendJson<{ ip: string; name: string }>(`/api/device-names/${encodeURIComponent(ip)}`, "PUT", { name }),
   deleteDeviceName: (ip: string) =>
     sendJson<{ deleted: string }>(`/api/device-names/${encodeURIComponent(ip)}`, "DELETE"),
+  listSuppressions: () => getJson<AlertSuppression[]>("/api/alert-suppressions"),
+  createSuppression: (rule_id: number, client_ip: string | null, domain: string | null) =>
+    sendJson<AlertSuppression>("/api/alert-suppressions", "POST", { rule_id, client_ip, domain }),
+  deleteSuppression: (id: number) =>
+    sendJson<{ deleted: number }>(`/api/alert-suppressions/${id}`, "DELETE"),
+
   deviceNameHistory: (ip: string) =>
     getJson<NameChangeEntry[]>(`/api/device-names/${encodeURIComponent(ip)}/history`),
   deviceNewDomains: (ip: string) =>
